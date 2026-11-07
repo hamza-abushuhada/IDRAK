@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #FAF6EF;
+  --color-paper-2: #F4EDE2;
+  --color-sand: #EFE6D8;
+  --color-sand-2: #E4D8C5;
+  --color-line: #E2D6C3;
+  --color-ink: #2B211B;
+  --color-ink-2: #5A4A3F;
+  --color-ink-3: #8A786A;
+  --color-terra: #C2593A;
+  --color-terra-2: #A9462A;
+  --color-terra-soft: #F3DDD3;
+  --color-olive: #6B7A3A;
+  --color-olive-soft: #E5E8D2;
+  --color-saffron: #D99A2B;
+  --color-saffron-soft: #F6E6C6;
+  --color-plum: #7A4B5C;
+  --color-sky: #4F7C8A;
+  --color-danger: #B3412E;
+  --color-cocoa: #1E1814;
+
+  --font-serif: var(--font-fraunces), "Alexandria", Georgia, serif;
+  --font-sans: var(--font-plex), var(--font-plex-ar), system-ui, sans-serif;
+  --font-arabic-display: var(--font-alexandria), var(--font-plex-ar), sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+
+  --radius-card: 14px;
+  --shadow-paper: 0 1px 0 rgba(43, 33, 27, 0.04), 0 8px 24px -12px rgba(43, 33, 27, 0.12);
+  --shadow-lift: 0 2px 0 rgba(43, 33, 27, 0.05), 0 18px 40px -18px rgba(43, 33, 27, 0.25);
+}
+
+:root {
+  --bg: var(--color-paper);
+  --fg: var(--color-ink);
+  color-scheme: light;
+}
+
+html { background: var(--bg); color: var(--fg); }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+html[lang="ar"] .font-serif,
+html[lang="ar"] h1, html[lang="ar"] h2, html[lang="ar"] h3 {
+  font-family: var(--font-arabic-display);
+  letter-spacing: 0;
+}
+html[lang="ar"] body { font-family: var(--font-plex-ar), var(--font-plex), system-ui, sans-serif; }
+
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.grain { position: relative; }
+.grain::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .35; mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.17 0 0 0 0 0.13 0 0 0 0 0.1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.scribble {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 12' preserveAspectRatio='none'%3E%3Cpath d='M2 8 C 40 2, 80 11, 120 6 S 180 3, 198 7' fill='none' stroke='%23C2593A' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: 0 100%; background-size: 100% .38em; padding-bottom: .12em;
+}
+
+@keyframes basira-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(217, 154, 43, .55); }
+  70% { box-shadow: 0 0 0 14px rgba(217, 154, 43, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 154, 43, 0); }
+}
+.basira-highlight {
+  outline: 2px solid var(--color-saffron) !important; outline-offset: 4px; border-radius: 10px;
+  animation: basira-pulse 1.4s ease-out 4; position: relative; z-index: 30; scroll-margin: 120px;
+}
+
+.basira-md > * + * { margin-top: .55em; }
+.basira-md strong { color: #FFF6E8; font-weight: 600; }
+.basira-md em { color: #E7C98D; font-style: normal; }
+.basira-md h1, .basira-md h2, .basira-md h3, .basira-md h4 { font-family: inherit !important; font-size: 13px; font-weight: 700; color: #F6C878; margin-top: .9em; }
+.basira-md ul, .basira-md ol { padding-inline-start: 1.1em; }
+.basira-md ul { list-style: "– "; }
+.basira-md ol { list-style: decimal; }
+.basira-md li + li { margin-top: .2em; }
+.basira-md code { background: #2f2620; border-radius: 4px; padding: 0 .3em; color: #F2C27A; }
+.basira-md hr { border: 0; border-top: 1px dashed #4a3b30; }
+.basira-md table { width: 100%; border-collapse: collapse; font-size: 12px; display: block; overflow-x: auto; }
+.basira-md th, .basira-md td { border: 1px solid #3f3229; padding: 4px 8px; text-align: start; white-space: nowrap; }
+.basira-md th { color: #F6C878; font-weight: 600; background: #261d18; }
+.basira-md a { color: #F2C27A; text-decoration: underline; }
+
+@keyframes blink { 50% { opacity: 0; } }
+.caret::after { content: "▍"; margin-inline-start: 2px; animation: blink 1s steps(1) infinite; color: var(--color-terra); }
+
+::selection { background: var(--color-saffron-soft); color: var(--color-ink); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--color-sand-2) transparent; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}

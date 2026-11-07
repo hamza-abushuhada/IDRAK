@@ -1,0 +1,6 @@
+confirmation: أكّد حسابك في إدراك · Confirm your Idrak account
+magic_link: رابط الدخول إلى إدراك · Your Idrak sign-in link
+recovery: إعادة تعيين كلمة المرور · Reset your Idrak password
+invite: انعزمت على إدراك · You’re invited to Idrak
+email_change: تأكيد الإيميل الجديد · Confirm your new email
+reauthentication: رمز التحقق · Your Idrak verification code
