@@ -160,11 +160,14 @@ async def get_invite(token: str):
 
 @router.post("/invitations/{token}/accept")
 async def accept_invite(token: str, user: User = Depends(current_user)):
-    inv = await db.fetchrow("select * from invitations where token=$1 and status='pending' and expires_at > now()", token)
-    if not inv:
-        raise HTTPException(404, "Invitation expired or already used")
-    await db.execute("insert into memberships(org_id,user_id,role) values($1,$2,$3) on conflict (org_id,user_id) do update set role=excluded.role", inv["org_id"], user.id, inv["role"])
-    await db.execute("update invitations set status='accepted' where id=$1", inv["id"])
+    async with db.transaction() as c:
+        inv = await c.fetchrow("select * from invitations where token=$1 and status='pending' and expires_at > now() for update", token)
+        if not inv:
+            raise HTTPException(404, "Invitation expired or already used")
+        if inv["email"].strip().casefold() != user.email.strip().casefold():
+            raise HTTPException(403, "This invitation was sent to a different email address")
+        await c.execute("insert into memberships(org_id,user_id,role) values($1,$2,$3) on conflict (org_id,user_id) do update set role=excluded.role", inv["org_id"], user.id, inv["role"])
+        await c.execute("update invitations set status='accepted' where id=$1", inv["id"])
     await db.audit(inv["org_id"], user.id, "team.joined", "membership", user.id, {"role": inv["role"]})
     return {"org_id": inv["org_id"]}
 
@@ -175,7 +178,18 @@ class RolePatch(BaseModel):
 
 @router.patch("/team/{membership_id}")
 async def change_role(membership_id: str, p: RolePatch, ctx: Ctx = Depends(require("manage_team"))):
-    await db.execute("update memberships set role=$3 where id=$1 and org_id=$2", membership_id, ctx.org_id, p.role)
+    if p.role not in ("owner", "manager", "accountant", "cashier"):
+        raise HTTPException(422, "Bad role")
+    async with db.transaction() as c:
+        await c.fetch("select id from memberships where org_id=$1 for update", ctx.org_id)
+        target = await c.fetchrow("select role, user_id from memberships where id=$1 and org_id=$2", membership_id, ctx.org_id)
+        if not target:
+            raise HTTPException(404, "Member not found")
+        if target["role"] == "owner" and p.role != "owner":
+            owners = await c.fetchval("select count(*) from memberships where org_id=$1 and role='owner'", ctx.org_id)
+            if owners <= 1:
+                raise HTTPException(400, "Can't demote the last owner")
+        await c.execute("update memberships set role=$3 where id=$1 and org_id=$2", membership_id, ctx.org_id, p.role)
     await db.audit(ctx.org_id, ctx.user.id, "team.role_changed", "membership", membership_id, {"role": p.role})
     return {"ok": True}
 

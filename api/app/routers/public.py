@@ -48,7 +48,14 @@ class Contact(BaseModel):
 async def contact(c: Contact):
     await db.execute("insert into contact_messages(name,email,phone,message,locale) values($1,$2,$3,$4,$5)", c.name, c.email, c.phone, c.message, c.locale)
     body = f"<p><b>{html.escape(c.name)}</b> &lt;{html.escape(c.email)}&gt; {html.escape(c.phone or '')}</p><p>{html.escape(c.message)}</p>"
-    await email.send("team@idrak.example.com", f"New contact message from {c.name}", email.layout("Contact form", body, "en"), reply_to=c.email)
+    delivery = await email.send(
+        "team@idrak.example.com",
+        f"New contact message from {c.name}",
+        email.layout("Contact form", body, "en"),
+        reply_to=c.email,
+    )
+    if not delivery.get("ok"):
+        raise HTTPException(503, "Message saved, but email delivery is temporarily unavailable")
     return {"ok": True}
 
 
