@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
+from collections import defaultdict, deque
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import db
 from .config import settings
@@ -29,8 +32,51 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Idrak API", version="1.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_origin_regex=r"https://([a-z0-9-]+\.)*vercel\.app",
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+_public_rate_limits = {
+    "/public/contact": (10, 60),
+    "/public/waitlist": (5, 300),
+    "/public/health-check": (3, 600),
+}
+_public_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()[:64]
+    return (request.client.host if request.client else "unknown")[:64]
+
+
+@app.middleware("http")
+async def rate_limit_public(request: Request, call_next):
+    limit_config = _public_rate_limits.get(request.url.path)
+    if limit_config and request.method.upper() == "POST":
+        limit, window = limit_config
+        now = time.monotonic()
+        key = (request.url.path, _client_ip(request))
+        timestamps = _public_requests[key]
+        while timestamps and now - timestamps[0] >= window:
+            timestamps.popleft()
+        if len(timestamps) >= limit:
+            retry_after = max(1, int(window - (now - timestamps[0])))
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please try again later."},
+                headers={"Retry-After": str(retry_after)},
+            )
+        timestamps.append(now)
+        if len(_public_requests) > 10000:
+            stale_before = now - 600
+            for request_key in list(_public_requests):
+                entries = _public_requests[request_key]
+                while entries and now - entries[0] >= 600:
+                    entries.popleft()
+                if not entries or entries[0] < stale_before:
+                    _public_requests.pop(request_key, None)
+    return await call_next(request)
 
 
 @app.middleware("http")
