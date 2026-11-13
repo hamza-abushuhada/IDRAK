@@ -9,13 +9,19 @@ import { Button, Field, Input } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 import GoogleButton, { OrDivider } from "@/components/GoogleButton";
 
-const DEMO_PASSWORD = "Idrak@Demo2026";
+// الدخول التجريبي بنقرة واحدة. كلمة المرور تصل إلى المتصفّح بحكم التصميم،
+// فهذه الحسابات يجب أن تفتح مستأجرين تجريبيين ببيانات اصطناعية فقط —
+// ولا يجوز أن يحمل أيٌّ منها صلاحية is_super_admin.
+// حساب المؤسس أُزيل من هذه القائمة: كان يمنح وصولاً إلى /admin/overview
+// (كل المستأجرين + قائمة الانتظار + رسائل التواصل) بنقرة من أي زائر.
+// اضبط NEXT_PUBLIC_ENABLE_DEMO_LOGIN=0 لإخفاء الكتلة كلياً في الإنتاج.
+const DEMO_PASSWORD = process.env.NEXT_PUBLIC_DEMO_PASSWORD || "Idrak@Demo2026";
+const DEMO_ENABLED = process.env.NEXT_PUBLIC_ENABLE_DEMO_LOGIN !== "0";
 const DEMOS = [
   { email: "owner@nashama.example.com", en: "Mini-market owner", ar: "مالك ميني ماركت", who: "Khaled · Al-Nashama Market" },
   { email: "manager@nashama.example.com", en: "Store manager", ar: "مديرة المحل", who: "Rania · Al-Nashama Market" },
   { email: "cashier@nashama.example.com", en: "Cashier (limited)", ar: "كاشير (صلاحيات محدودة)", who: "Yazan · Al-Nashama Market" },
   { email: "owner@alshifa.example.com", en: "Pharmacy owner", ar: "مالكة صيدلية", who: "Dr. Lina · Al-Shifa Pharmacy" },
-  { email: "founder@idrak.example.com", en: "Founder console", ar: "لوحة المؤسس", who: "Hamza · Idrak" },
 ];
 
 function LoginInner() {
@@ -65,6 +71,7 @@ function LoginInner() {
       </form>
       <p className="mt-6 text-center text-sm text-ink-2">{tx("New to Idrak?", "جديد على إدراك؟")} <Link href={`/${locale}/signup`} className="font-medium text-terra">{tx("Create an account", "أنشئ حساب")}</Link></p>
 
+      {DEMO_ENABLED && (
       <div className="mt-10 rounded-2xl border border-dashed border-sand-2 p-4">
         <p className="text-[12px] font-medium uppercase tracking-[.12em] text-ink-3">{tx("Try the live demo", "جرّب العرض الحي")}</p>
         <div className="mt-3 grid gap-1.5">
@@ -77,6 +84,7 @@ function LoginInner() {
           ))}
         </div>
       </div>
+      )}
     </div>
   );
 }

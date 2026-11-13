@@ -105,4 +105,9 @@ def require(perm: str):
 async def super_admin(user: User = Depends(current_user)) -> User:
     if not user.is_super_admin:
         raise HTTPException(403, "Founder console only")
+    # دفاع ثانٍ: حسابات العرض التجريبي تُنشأ بكلمة مرور مشتركة تصل إلى
+    # المتصفّح، فلا يجوز أن تفتح وحدة التحكّم العابرة للمستأجرين مهما كان
+    # العلم في قاعدة البيانات. هذا يُبطل أي بذر قديم أو مستقبلي يمنحها الصلاحية.
+    if user.email and user.email.strip().casefold().endswith(".example.com"):
+        raise HTTPException(403, "Founder console only")
     return user
