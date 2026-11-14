@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import math
+import os
 import random
 import sys
 import uuid
@@ -21,7 +22,7 @@ END = dt.date.today() - dt.timedelta(days=1)
 
 DEMO_PASSWORD = "Idrak@Demo2026"
 DEMO_USERS = [
-    ("founder@idrak.example.com", "Hamza Abushuhada", "حمزة أبو شحادة", True),
+    ("founder@idrak.example.com", "Hamza Abushuhada", "حمزة أبو شحادة", False),
     ("owner@nashama.example.com", "Khaled Al-Majali", "خالد المجالي", False),
     ("manager@nashama.example.com", "Rania Haddad", "رانيا حداد", False),
     ("accountant@nashama.example.com", "Mahmoud Obeidat", "محمود عبيدات", False),
@@ -591,6 +592,15 @@ EXTRA_TENANTS = [
 
 
 async def main():
+    # هذا السكربت ينشئ حسابات بكلمة مرور مشتركة، ويحذف صفوفاً من
+    # waitlist و health_checks و contact_messages. لا يجوز تشغيله على بيئة
+    # إنتاج. الحارس صريح بدل الاعتماد على الانتباه.
+    if os.getenv("IDRAK_ALLOW_SEED") != "yes":
+        sys.exit(
+            "Refusing to seed: this creates shared-password demo accounts and "
+            "deletes rows from waitlist, health_checks and contact_messages.\n"
+            "Set IDRAK_ALLOW_SEED=yes only on a disposable environment."
+        )
     print("Creating demo users …")
     users = await ensure_users()
     conn = await asyncpg.connect(settings.database_url, statement_cache_size=0, command_timeout=600)
