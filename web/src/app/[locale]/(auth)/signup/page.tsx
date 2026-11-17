@@ -29,8 +29,12 @@ function SignupInner() {
     });
     setLoading(false);
     if (error) return toast(tx("Couldn't create the account", "ما قدرنا ننشئ الحساب"), error.message, "error");
-    if (data.session) router.replace(next || `/${locale}/onboarding`);
-    else setSent(true);
+    if (data.session) {
+      // نسمح فقط بمسار نسبي (يبدأ بـ /) لمنع فتح إعادة توجيه إلى موقع
+      // خارجي يحاكي صفحتنا. login/page.tsx:37 يفعل نفس الشيء.
+      const safeNext = next && next.startsWith("/") ? next : null;
+      router.replace(safeNext || `/${locale}/onboarding`);
+    } else setSent(true);
   }
 
   if (sent) {
