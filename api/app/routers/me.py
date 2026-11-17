@@ -70,10 +70,14 @@ async def create_org(o: OrgIn, user: User = Depends(current_user)):
 
 @router.post("/me/join-demo")
 async def join_demo(user: User = Depends(current_user)):
-    org = await db.fetchval("select id from organizations where slug='al-nashama'")
+    # شرطان: المتجر مُعلَّم is_demo (عمود موجود في organizations)،
+    # والرتبة الممنوحة cashier لا manager. manager يحمل clean_data الذي
+    # يمكّن POST /data/runs/{id}/undo من حذف sales/customers/products.
+    # cashier يسمح بالاستعراض فقط، وهذا كافٍ لهدف العرض التجريبي.
+    org = await db.fetchval("select id from organizations where slug='al-nashama' and is_demo")
     if not org:
         raise HTTPException(404, "Demo data not seeded")
-    await db.execute("insert into memberships(org_id,user_id,role) values($1,$2,'manager') on conflict do nothing", org, user.id)
+    await db.execute("insert into memberships(org_id,user_id,role) values($1,$2,'cashier') on conflict do nothing", org, user.id)
     return {"id": org}
 
 
@@ -190,17 +194,37 @@ async def change_role(membership_id: str, p: RolePatch, ctx: Ctx = Depends(requi
             if owners <= 1:
                 raise HTTPException(400, "Can't demote the last owner")
         await c.execute("update memberships set role=$3 where id=$1 and org_id=$2", membership_id, ctx.org_id, p.role)
+    # إبطال ذاكرة الصلاحيات للمستخدم بعد تغيير الدور. بدونه يظلّ عاملاً
+    # برتبته السابقة حتى 30 ثانية.
+    db.cache_evict(("member", str(target["user_id"]), ctx.org_id))
     await db.audit(ctx.org_id, ctx.user.id, "team.role_changed", "membership", membership_id, {"role": p.role})
     return {"ok": True}
 
 
 @router.delete("/team/{membership_id}")
 async def remove_member(membership_id: str, ctx: Ctx = Depends(require("manage_team"))):
-    owners = await db.fetchval("select count(*) from memberships where org_id=$1 and role='owner'", ctx.org_id)
-    target = await db.fetchrow("select role, user_id from memberships where id=$1 and org_id=$2", membership_id, ctx.org_id)
-    if target and target["role"] == "owner" and owners <= 1:
-        raise HTTPException(400, "Can't remove the last owner")
-    await db.execute("delete from memberships where id=$1 and org_id=$2", membership_id, ctx.org_id)
+    # نفس نمط change_role أعلاه: نقفل كل عضويات المؤسسة ضمن معاملة واحدة
+    # قبل القراءة والفحص والحذف. بدون القفل كان طلبان متزامنان لحذف آخر
+    # مالكَين يمرّان كلاهما ويتركان المؤسسة بلا مالك.
+    async with db.transaction() as c:
+        await c.fetch("select id from memberships where org_id=$1 for update", ctx.org_id)
+        target = await c.fetchrow(
+            "select role, user_id from memberships where id=$1 and org_id=$2",
+            membership_id, ctx.org_id)
+        if not target:
+            raise HTTPException(404, "Member not found")
+        if target["role"] == "owner":
+            owners = await c.fetchval(
+                "select count(*) from memberships where org_id=$1 and role='owner'",
+                ctx.org_id)
+            if owners <= 1:
+                raise HTTPException(400, "Can't remove the last owner")
+        await c.execute(
+            "delete from memberships where id=$1 and org_id=$2",
+            membership_id, ctx.org_id)
+    # إبطال ذاكرة الصلاحيات للمستخدم المحذوف. بدونه يظلّ قادراً على
+    # استخدام رتبته السابقة حتى 30 ثانية (TTL في auth.py:89).
+    db.cache_evict(("member", str(target["user_id"]), ctx.org_id))
     await db.audit(ctx.org_id, ctx.user.id, "team.removed", "membership", membership_id)
     return {"ok": True}
 

@@ -7,6 +7,7 @@ from .. import db
 from ..cleaning import engine
 from ..cleaning.fields import auto_map
 from ..cleaning.io import read_table
+from ..config import settings
 from ..services import email
 
 router = APIRouter(prefix="/public", tags=["public"])
@@ -49,7 +50,7 @@ async def contact(c: Contact):
     await db.execute("insert into contact_messages(name,email,phone,message,locale) values($1,$2,$3,$4,$5)", c.name, c.email, c.phone, c.message, c.locale)
     body = f"<p><b>{html.escape(c.name)}</b> &lt;{html.escape(c.email)}&gt; {html.escape(c.phone or '')}</p><p>{html.escape(c.message)}</p>"
     delivery = await email.send(
-        "team@idrak.example.com",
+        settings.contact_recipient,
         f"New contact message from {c.name}",
         email.layout("Contact form", body, "en"),
         reply_to=c.email,
@@ -62,15 +63,20 @@ async def contact(c: Contact):
 @router.post("/health-check")
 async def health_check(file: UploadFile = File(...)):
     data = await file.read()
-    if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(413, "File too large (max 5MB)")
+    # حدود مقلّصة للمسار المجهول. cleaning/engine.cluster_values يقارن كل
+    # قيمة مميّزة بكل مجموعة متراكمة في ٦ أنواع أعمدة، أي O(n²) على عدد
+    # القيم المميّزة. حتى 5000 صفّ بقيم مميّزة تماماً يمكن أن تُكلّف ثواني
+    # على المعالج. 2MB / 1000 صفّ يبقيان الميزة عاملة لفحص صحّة البيانات
+    # السريع، ويرفعان حدّ أسوأ حالة إلى ما يستطيع حدّ المعدّل احتواءه فعلاً.
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 2MB)")
     try:
         headers, rows, _ = read_table(file.filename or "file.csv", data)
     except Exception as e:
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers or not rows:
         raise HTTPException(422, "The file looks empty")
-    rows = rows[:5000]
+    rows = rows[:1000]
     mapping = {h: m["field"] for h, m in auto_map(headers).items()}
     res = engine.run(headers, rows, mapping)
     await db.execute("insert into health_checks(file_name,row_count,score) values($1,$2,$3)", file.filename, len(rows), res["score_before"]["score"])

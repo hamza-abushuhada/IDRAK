@@ -23,6 +23,10 @@ class Settings:
     gemini_fallback_model = _env("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
     resend_api_key = _env("RESEND_API_KEY")
     resend_from = _env("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+    # عنوان مستلم نموذج "اتصل بنا". الافتراضي example.com نطاق محجوز للتوثيق
+    # لا يستقبل بريداً، فبدون ضبط هذا المتغيّر في البيئة كل رسالة ستفشل
+    # بحالة 503. اضبطه لإيميل حقيقي يصل إليك.
+    contact_recipient = _env("CONTACT_RECIPIENT_EMAIL", "team@idrak.example.com")
     web_url = _env("WEB_URL", "http://localhost:3000").rstrip("/")
     cors_origins = [o.strip() for o in _env("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if o.strip()]
 
