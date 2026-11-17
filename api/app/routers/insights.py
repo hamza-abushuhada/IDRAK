@@ -37,7 +37,7 @@ async def forecast(product_id: str | None = None, category_id: str | None = None
 
 @router.get("/insights/reorder")
 async def reorder(cover_days: int = 14, branch_id: str | None = None, ctx: Ctx = Depends(require("view_dashboard"))):
-    return await I.reorder(ctx.org_id, cover_days, branch_id)
+    return await I.reorder(ctx.org_id, max(1, min(cover_days, 90)), branch_id)
 
 
 class POLine(BaseModel):
@@ -124,7 +124,7 @@ async def customers(ctx: Ctx = Depends(require("view_dashboard"))):
 
 @router.get("/insights/basket")
 async def basket(days: int = 60, ctx: Ctx = Depends(require("view_dashboard"))):
-    return {"pairs": await I.basket(ctx.org_id, days)}
+    return {"pairs": await I.basket(ctx.org_id, max(7, min(days, 365)))}
 
 
 class SimIn(BaseModel):
@@ -148,7 +148,7 @@ async def cashflow(weeks: int = 8, opening: float | None = None, ctx: Ctx = Depe
 
 @router.get("/compliance")
 async def compliance(days: int = 90, ctx: Ctx = Depends(require("view_finance"))):
-    return await I.compliance(ctx.org_id, days)
+    return await I.compliance(ctx.org_id, max(7, min(days, 365)))
 
 
 @router.get("/goals")

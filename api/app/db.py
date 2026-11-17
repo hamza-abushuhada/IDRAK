@@ -107,18 +107,37 @@ async def audit(org_id: str | None, user_id: str | None, action: str, entity: st
 import time as _time
 
 _cache: dict = {}
+# سقف صلب لعدد المدخلات. أي مستخدم مصادق يمكنه تضخيم مفاتيح مختلفة عبر
+# معاملات غير محدودة في /insights (basket days, cashflow opening, …)،
+# والقاموس كان ينمو إلى الأبد. 5000 يسع عدّة مستأجرين بقيم شائعة ويبقي
+# استهلاك الذاكرة حدوده معقولة.
+_CACHE_MAX = 5000
 
 
 def cache_get(key, ttl: float):
     v = _cache.get(key)
-    if v and _time.monotonic() - v[0] < ttl:
-        return v[1]
-    return None
+    if v is None:  # ليس "if v" — القائمة الفارغة قيمة محفوظة مشروعة
+        return None
+    if _time.monotonic() - v[0] >= ttl:
+        _cache.pop(key, None)  # نحذف المدخل المنتهي بدلاً من تركه للأبد
+        return None
+    return v[1]
 
 
 def cache_set(key, value):
+    if len(_cache) >= _CACHE_MAX:
+        # إخلاء أقدم 10% عند بلوغ السقف. ليس LRU كاملاً لكن كافٍ لمنع النمو
+        # غير المحدود دون إضافة اعتماديّات.
+        for k in sorted(_cache, key=lambda k: _cache[k][0])[:_CACHE_MAX // 10]:
+            _cache.pop(k, None)
     _cache[key] = (_time.monotonic(), value)
     return value
+
+
+def cache_evict(key) -> None:
+    """إبطال مفتاح واحد. يُستخدم عند تغيير العضوية/الدور حتى لا تظلّ
+    صلاحيات مستخدم محذوف فعّالة ٣٠ ثانية بعد الإزالة."""
+    _cache.pop(key, None)
 
 
 def cache_clear(prefix=None):
