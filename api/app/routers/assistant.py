@@ -56,13 +56,16 @@ async def sessions(ctx: Ctx = Depends(org_ctx)):
 
 @router.get("/sessions/{sid}")
 async def session(sid: str, ctx: Ctx = Depends(org_ctx)):
+    # نضيف s.org_id=$3 حتى تظلّ الجلسة متاحة فقط من المؤسسة التي أُنشئت
+    # فيها. بدونه، مستخدم في عدّة مؤسسات يمكنه قراءة جلساته من مؤسسة أخرى
+    # بعد إلغاء عضويته منها، لأن user_id وحده ليس كافياً للحدود.
     return await db.fetch("""select m.role, m.content, m.events, m.created_at from chat_messages m join chat_sessions s on s.id=m.session_id
-                             where s.id=$1 and s.user_id=$2 and m.role in ('user','assistant') order by m.created_at""", sid, ctx.user.id)
+                             where s.id=$1 and s.user_id=$2 and s.org_id=$3 and m.role in ('user','assistant') order by m.created_at""", sid, ctx.user.id, ctx.org_id)
 
 
 @router.delete("/sessions/{sid}")
 async def delete_session(sid: str, ctx: Ctx = Depends(org_ctx)):
-    await db.execute("delete from chat_sessions where id=$1 and user_id=$2", sid, ctx.user.id)
+    await db.execute("delete from chat_sessions where id=$1 and user_id=$2 and org_id=$3", sid, ctx.user.id, ctx.org_id)
     return {"ok": True}
 
 
