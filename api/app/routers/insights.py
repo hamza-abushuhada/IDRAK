@@ -59,6 +59,17 @@ async def send_po(p: POIn, ctx: Ctx = Depends(require("send_supplier_email"))):
     sup = await db.fetchrow("select * from suppliers where id=$1 and org_id=$2", p.supplier_id, ctx.org_id)
     if not sup:
         raise HTTPException(404, "Supplier not found")
+    # فحص دفعة واحدة لكل فروع الطلب قبل أي كتابة. المفتاح الأجنبي يفرض
+    # الوجود فقط، فبدون هذا، فرع من مؤسسة أخرى يمرّ إلى purchases وإلى
+    # الإيميل الصادر للمورّد.
+    requested_bids = {l.branch_id for l in p.lines}
+    if requested_bids:
+        owned = {r["id"] for r in await db.fetch(
+            "select id from branches where org_id=$1 and id = any($2::uuid[])",
+            ctx.org_id, list(requested_bids))}
+        unknown = requested_bids - {str(b) for b in owned}
+        if unknown:
+            raise HTTPException(404, "Branch not found")
     org = await db.fetchrow("select name, name_ar from organizations where id=$1", ctx.org_id)
     by_branch: dict[str, list[POLine]] = {}
     for l in p.lines:
@@ -74,13 +85,18 @@ async def send_po(p: POIn, ctx: Ctx = Depends(require("send_supplier_email"))):
             rows = []
             for l in lines:
                 pr = await c.fetchrow("select name, name_ar, cost from products where id=$1 and org_id=$2", l.product_id, ctx.org_id)
+                if not pr:
+                    # كان يُنتج 500 عبر pr["cost"]. 404 أوضح وأدقّ للمتصل.
+                    raise HTTPException(404, "Product not found")
                 lt = round(l.quantity * pr["cost"], 3)
                 total += lt
                 rows.append((pr, l.quantity, lt))
                 await c.execute("insert into purchase_items(org_id,purchase_id,product_id,quantity,unit_cost,line_total) values($1,$2,$3,$4,$5,$6)",
                                 ctx.org_id, pid, l.product_id, l.quantity, pr["cost"], lt)
             await c.execute("update purchases set total=$2 where id=$1", pid, round(total, 3))
-        branch = await db.fetchrow("select name, name_ar from branches where id=$1", bid)
+        # الفحص المسبق أعلاه يضمن أن هذا الفرع ملك للمتصل، لكن نضيف org_id
+        # كدفاع ثانٍ في حال أُعيدت كتابة الحلقة لاحقاً.
+        branch = await db.fetchrow("select name, name_ar from branches where id=$1 and org_id=$2", bid, ctx.org_id)
         ar = p.locale == "ar"
         table = "".join(f"<tr><td style='padding:6px 8px;border-bottom:1px solid #E2D6C3'>{html.escape(pr['name_ar'] if ar and pr['name_ar'] else pr['name'])}</td>"
                         f"<td style='padding:6px 8px;border-bottom:1px solid #E2D6C3;text-align:center'>{q:g}</td></tr>" for pr, q, lt in rows)
