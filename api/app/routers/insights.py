@@ -138,10 +138,13 @@ async def compliance(days: int = 90, ctx: Ctx = Depends(require("view_finance"))
 @router.get("/goals")
 async def goals(ctx: Ctx = Depends(require("view_dashboard"))):
     end = await I.data_end(ctx.org_id)
+    # b.org_id=g.org_id و s.org_id=g.org_id يمنعان قراءة اسم أو إيرادات فرع
+    # لا ينتمي إلى مؤسسة المتصل، حتى لو كان صفّ هدف ملوّث قد خُزّن سابقاً
+    # (انظر add_goal أدناه).
     return await db.fetch("""select g.id, g.branch_id, b.name branch, b.name_ar branch_ar, g.metric, g.period_month, g.target,
-        (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.status='completed'
+        (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
            and date_trunc('month', amman_date(s.sold_at)) = g.period_month and amman_date(s.sold_at) <= $2) actual
-        from goals g left join branches b on b.id=g.branch_id where g.org_id=$1 order by g.period_month desc, b.name""", ctx.org_id, end)
+        from goals g left join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 order by g.period_month desc, b.name""", ctx.org_id, end)
 
 
 class GoalIn(BaseModel):
@@ -153,6 +156,12 @@ class GoalIn(BaseModel):
 @router.post("/goals")
 async def add_goal(g: GoalIn, ctx: Ctx = Depends(require("manage_alerts"))):
     m = dt.date.fromisoformat(g.period_month[:7] + "-01")
+    # فحص ملكية الفرع. قيد المفتاح الأجنبي يفرض وجود الفرع لكن لا يفرض
+    # انتماءه لمؤسسة المتصل، ولا توجد سياسة RLS تحمي هذا المسار.
+    owned = await db.fetchval(
+        "select 1 from branches where id=$1 and org_id=$2", g.branch_id, ctx.org_id)
+    if not owned:
+        raise HTTPException(404, "Branch not found")
     await db.execute("delete from goals where org_id=$1 and branch_id=$2 and period_month=$3", ctx.org_id, g.branch_id, m)
     await db.execute("insert into goals(org_id,branch_id,metric,period_month,target) values($1,$2,'revenue',$3,$4)", ctx.org_id, g.branch_id, m, g.target)
     return {"ok": True}
