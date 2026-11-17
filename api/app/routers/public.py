@@ -7,6 +7,7 @@ from .. import db
 from ..cleaning import engine
 from ..cleaning.fields import auto_map
 from ..cleaning.io import read_table
+from ..config import settings
 from ..services import email
 
 router = APIRouter(prefix="/public", tags=["public"])
@@ -49,7 +50,7 @@ async def contact(c: Contact):
     await db.execute("insert into contact_messages(name,email,phone,message,locale) values($1,$2,$3,$4,$5)", c.name, c.email, c.phone, c.message, c.locale)
     body = f"<p><b>{html.escape(c.name)}</b> &lt;{html.escape(c.email)}&gt; {html.escape(c.phone or '')}</p><p>{html.escape(c.message)}</p>"
     delivery = await email.send(
-        "team@idrak.example.com",
+        settings.contact_recipient,
         f"New contact message from {c.name}",
         email.layout("Contact form", body, "en"),
         reply_to=c.email,
