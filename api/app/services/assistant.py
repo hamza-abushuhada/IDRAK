@@ -157,31 +157,35 @@ off_topic: general knowledge, trivia, coding, homework, essays, translation of u
 If ambiguous but plausibly about the shop, choose in_scope.
 Return JSON {"label": "in_scope" | "off_topic", "lang": "ar" | "en"}."""
 
-FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|grant|revoke|truncate|copy|call|do|execute|vacuum|analyze|comment|security|set|reset|listen|notify|lock|prepare|refresh)\b|pg_|;\s*\S|--|/\*", re.I)
-ALLOWED_TABLES = {"v_sales", "v_sale_lines", "v_inventory", "v_products", "v_purchases", "branches", "employees", "customers", "suppliers", "categories",
-                  "inventory_batches", "inventory_levels", "goals", "products", "sales", "sale_items", "purchases", "purchase_items", "insights"}
+# الحارس القائم على السماح (sql_guard) يحلّ محلّ FORBIDDEN/ALLOWED_TABLES القديمة
+# التي كانت تفلتر بالمنع. راجع api/app/services/sql_guard.py للمنطق الكامل
+# واختباراته في test_sql_guard.py.
+from .sql_guard import SqlRejected, validate as _validate_sql
 
 
 async def _sql(org_id: str, sql: str) -> dict:
-    s = sql.strip().rstrip(";").strip()
-    if not re.match(r"^(select|with)\b", s, re.I) or FORBIDDEN.search(s):
-        return {"error": "Only a single read-only SELECT is allowed."}
-    tables = {t.lower() for t in re.findall(r"\b(?:from|join)\s+([a-z_][a-z0-9_\.]*)", s, re.I)}
-    ctes = {c.lower() for c in re.findall(r"\b([a-z_][a-z0-9_]*)\s+as\s*\(", s, re.I)}
-    bad = [t for t in tables if t not in ALLOWED_TABLES and t not in ctes and not t.startswith("generate_series")]
-    if bad:
-        return {"error": f"Table(s) not available: {', '.join(bad)}"}
+    try:
+        s = _validate_sql(sql)
+    except SqlRejected as e:
+        return {"error": str(e)}
     try:
         async with db.pool().acquire() as c:
             async with c.transaction(readonly=True):
                 await c.execute("set local statement_timeout = '5s'")
                 await c.execute("set local role basira_ai_reader")
+                # دفاع ثانٍ: نتأكّد أن تبديل الدور فعلاً نجح. لو كان
+                # basira_ai_reader غير موجود، استعلام النموذج سيعمل بصلاحية
+                # دور التطبيق (الذي يتجاوز RLS)، والفشل سيكون صامتاً بدون هذا.
+                actual = await c.fetchval("select current_user")
+                if actual != "basira_ai_reader":
+                    raise RuntimeError("tenant reader role not active")
                 await c.execute("select set_config('app.org_id', $1, true)", str(org_id))
                 rs = await c.fetch(f"select * from ({s}) _q limit 200")
         rows = db.rows(rs)
         return {"rows": rows[:60], "row_count": len(rows), "truncated": len(rows) > 60}
-    except Exception as e:
-        return {"error": str(e).split("\n")[0][:300]}
+    except Exception:
+        log.exception("assistant sql failed")
+        return {"error": "That query could not be run."}
 
 
 async def _find(org_id: str, entity: str, query: str) -> list[dict]:
