@@ -4,6 +4,7 @@ import datetime as dt
 import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from rapidfuzz import fuzz, process
 
@@ -19,8 +20,8 @@ RULES = {
     "excel_date": ("Excel serial numbers converted to dates", "تحويل أرقام إكسل إلى تواريخ", "format"),
     "hijri_date": ("Hijri dates converted to Gregorian", "تحويل التواريخ الهجرية إلى ميلادية", "format"),
     "money_format": ("Currency text removed from amounts (JD, د.ا)", "إزالة رموز العملة من المبالغ (JD، د.ا)", "format"),
+    "fils_to_jd": ("Amounts converted from fils to JOD using the import settings", "تحويل المبالغ من فلس إلى دينار حسب إعدادات الاستيراد", "format"),
     "decimal_comma": ("Decimal commas fixed (0,350 → 0.350)", "تصحيح الفاصلة العشرية (0,350 ← 0.350)", "format"),
-    "fils_to_jd": ("Prices typed in fils converted to JD (350 → 0.350)", "تحويل الأسعار المكتوبة بالفلس إلى دينار (350 ← 0.350)", "fix"),
     "quantity_format": ("Quantities converted to plain numbers", "تحويل الكميات إلى أرقام", "format"),
     "phone_e164": ("Phone numbers standardized to +962 format", "توحيد أرقام الهواتف بصيغة 962+", "format"),
     "email_fix": ("Email typos fixed (gmial → gmail)", "تصحيح أخطاء الإيميلات (gmial ← gmail)", "fix"),
@@ -32,8 +33,6 @@ RULES = {
     "value_merge": ("Similar spellings merged", "دمج التهجئات المتشابهة", "merge"),
     "title_case": ("Capitalization fixed", "تصحيح الأحرف الكبيرة والصغيرة", "standardize"),
     "id_format": ("Invoice numbers cleaned (spaces, case, digits)", "تنظيف أرقام الفواتير", "standardize"),
-    "derived_total": ("Missing totals calculated (qty × price)", "حساب الإجمالي الناقص (الكمية × السعر)", "fill"),
-    "recalc_total": ("Wrong totals recalculated (qty × price)", "إعادة حساب الإجماليات الخاطئة", "fix"),
     "duplicate_row": ("Duplicate rows removed", "حذف الصفوف المكررة", "dedupe"),
     "blank_row": ("Empty rows removed", "حذف الصفوف الفارغة", "dedupe"),
     "memory": ("Applied rules Idrak learned from you", "تطبيق قواعد التنظيف اللي تعلّمها إدراك منك", "memory"),
@@ -50,8 +49,10 @@ FLAGS = {
     "future_date": ("Dates in the future", "تواريخ بالمستقبل"),
     "missing_required": ("Missing required values", "قيم أساسية ناقصة"),
     "unknown_product": ("Products not in your catalog", "أصناف غير موجودة بقائمتك"),
+    "missing_total": ("Line total is missing", "إجمالي السطر ناقص"),
+    "total_mismatch": ("Line total does not match quantity × unit price", "إجمالي السطر لا يطابق الكمية × سعر الوحدة"),
 }
-PRIORITY = ["memory", "fils_to_jd", "recalc_total", "derived_total", "product_match", "person_match", "branch_map", "payment_map", "city_map",
+PRIORITY = ["memory", "fils_to_jd", "product_match", "person_match", "branch_map", "payment_map", "city_map",
             "value_merge", "hijri_date", "excel_date", "email_fix", "phone_e164", "date_format", "decimal_comma", "money_format",
             "quantity_format", "arabic_digits", "id_format", "title_case", "gender_map", "null_token", "whitespace"]
 CATEGORICAL = {"product", "person", "branch", "payment", "city", "area", "category", "company", "gender"}
@@ -179,7 +180,8 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
     return out
 
 
-def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ctx: Context | None = None, today: dt.date | None = None) -> dict:
+def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ctx: Context | None = None,
+        today: dt.date | None = None, price_unit: str = "jd", date_order: str = "auto") -> dict:
     ctx = ctx or Context()
     today = today or dt.date.today()
     fields = {h: mapping.get(h) for h in headers}
@@ -217,7 +219,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             continue
 
         if kind == "date":
-            dayfirst = P.column_dayfirst(vals)
+            dayfirst = P.column_dayfirst(vals) if date_order == "auto" else date_order != "mdy"
             for ri in range(n):
                 if ri in blank:
                     continue
@@ -239,12 +241,6 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                 parsed.append((v, rule))
             good = [v for v, _ in parsed if v is not None and v > 0]
             med = statistics.median(good) if good else 0
-            prod_col = next((col_idx[x] for x, ff in fields.items() if ff == "product"), None)
-            per_prod = defaultdict(list)
-            if kind == "money" and prod_col is not None:
-                for ri, (v, _) in enumerate(parsed):
-                    if v and v < 100:
-                        per_prod[match_key(raw[ri][prod_col])].append(v)
             for ri, (v, rule) in enumerate(parsed):
                 if ri in blank:
                     continue
@@ -255,14 +251,8 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                         record(ri, ci, "", "null_token")
                     continue
                 conf = 1.0
-                if kind == "money" and v >= 50 and float(v).is_integer():
-                    ref = per_prod.get(match_key(raw[ri][prod_col]) if prod_col is not None else "", [])
-                    ref_med = statistics.median(ref) if ref else None
-                    small = [x for x in good if x < 50]
-                    if ref_med and ref_med < 50 and abs(v / 1000 - ref_med) <= max(0.6 * ref_med, 0.2):
-                        v, rule, conf = v / 1000, "fils_to_jd", 0.92
-                    elif not ref_med and small and len(small) >= 0.6 * len(good) and v >= 100 and v / 1000 <= max(small) * 1.5:
-                        v, rule, conf = v / 1000, "fils_to_jd", 0.85
+                if kind == "money" and price_unit == "fils":
+                    v, rule = v / 1000, "fils_to_jd"
                 if kind == "quantity":
                     if v < 0:
                         flags.append(Flag(ri, h, vals[ri], "negative_qty"))
@@ -387,24 +377,25 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             if ri in blank:
                 continue
             try:
-                q, p = float(clean[ri][qi]), float(clean[ri][pi])
-            except ValueError:
+                q = Decimal(clean[ri][qi])
+                p = Decimal(clean[ri][pi])
+            except (InvalidOperation, TypeError):
                 continue
             if q <= 0 or q > 200:
                 continue
-            exp = round(q * p, 3)
+            exp = (q * p).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
             if exp > 2000:
                 continue
             t = clean[ri][ti]
             if not t:
-                record(ri, ti, f"{exp:.3f}", "derived_total", 0.95)
+                flags.append(Flag(ri, headers[ti], "", "missing_total"))
             else:
                 try:
-                    tv = float(t)
-                    if abs(tv - exp) > 0.011 and abs(tv - exp) > 0.02 * max(abs(exp), 0.001):
-                        record(ri, ti, f"{exp:.3f}", "recalc_total", 0.85)
+                    tv = Decimal(t)
+                    if abs(tv - exp) > Decimal("0.011") and abs(tv - exp) > Decimal("0.02") * max(abs(exp), Decimal("0.001")):
+                        flags.append(Flag(ri, headers[ti], t, "total_mismatch"))
                 except ValueError:
-                    pass
+                    flags.append(Flag(ri, headers[ti], t, "invalid_number"))
 
     for (ri, ci), rules in cell_rules.items():
         if clean[ri][ci] == raw[ri][ci]:
@@ -417,7 +408,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         grp = None
         if rule in ("product_match", "person_match", "branch_map", "value_merge", "payment_map", "city_map", "memory"):
             grp = f"{h}::{clean[ri][ci]}"
-        conf = 0.92 if rule == "fils_to_jd" else 0.85 if rule == "recalc_total" else 0.95 if rule == "derived_total" else 1.0
+        conf = 1.0
         changes.append(Change(ri, h, raw[ri][ci], clean[ri][ci], rule, RULES[rule][2], conf, grp))
 
     seen = {}

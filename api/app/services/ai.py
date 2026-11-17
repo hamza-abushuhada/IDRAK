@@ -48,6 +48,7 @@ async def generate_json(prompt: str, system: str, org_id=None, user_id=None, kin
 MAPPING_SYSTEM = """You map spreadsheet columns from Jordanian small businesses (Arabic, English or mixed headers) to Idrak fields.
 Allowed fields: invoice_number, date, branch, cashier, product, barcode, sku, category, quantity, unit_price, cost, total, discount,
 payment_method, customer_name, phone, email, city, area, supplier, carton_price, pack_size, stock, expiry_date, updated_at, notes, gender.
+Also allowed: minimum_stock, tax.
 Use null when no field fits. Each field can be used at most once. Look at sample values, not only headers.
 Return JSON: {"columns": {"<header>": {"field": "<field or null>", "confidence": 0..1, "reason": "<short english>"}}}"""
 
