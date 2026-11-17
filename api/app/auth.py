@@ -30,13 +30,26 @@ def _jwks_client() -> jwt.PyJWKClient:
     return jwt.PyJWKClient(f"{settings.supabase_url}/auth/v1/.well-known/jwks.json")
 
 
+# claims مطلوبة في كل رمز. PyJWT الافتراضي يفحص exp فقط إذا كان موجوداً،
+# ولا يتطلّب أي claim. بدون هذا، رمز بلا exp لا ينتهي أبداً.
+_REQUIRED_CLAIMS = {"require": ["exp", "sub", "aud"]}
+
+
 def decode_token(token: str) -> dict:
     try:
-        header = jwt.get_unverified_header(token)
-        if header.get("alg") == "HS256":
-            return jwt.decode(token, settings.supabase_jwt_secret, algorithms=["HS256"], audience="authenticated")
-        key = _jwks_client().get_signing_key_from_jwt(token).key
-        return jwt.decode(token, key, algorithms=[header.get("alg", "ES256")], audience="authenticated")
+        secret = settings.supabase_jwt_secret
+        if secret:
+            # الخوارزمية مثبّتة من الخادم، لا من ترويسة الرمز. بدون هذا كان
+            # المهاجم يختار الفرع بترويسة "alg": "HS256"، فإن كان السرّ
+            # مكشوفاً بأي طريقة يستطيع تزوير أي رمز.
+            return jwt.decode(token, secret, algorithms=["HS256"],
+                              audience="authenticated", options=_REQUIRED_CLAIMS)
+        # لا سرّ HMAC مضبوط → JWKS/ES256 حصراً. خوارزمية المفتاح نفسه
+        # هي المرجع، لا أي قيمة في الترويسة.
+        signing_key = _jwks_client().get_signing_key_from_jwt(token)
+        return jwt.decode(token, signing_key.key,
+                          algorithms=[signing_key.algorithm_name or "ES256"],
+                          audience="authenticated", options=_REQUIRED_CLAIMS)
     except jwt.PyJWTError as e:
         raise HTTPException(401, f"Invalid session: {e}") from e
 

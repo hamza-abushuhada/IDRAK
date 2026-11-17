@@ -166,7 +166,7 @@ async def supplier(sid: str, ctx: Ctx = Depends(require("view_sales"))):
 
 @router.get("/employees")
 async def employees(days: int = 30, ctx: Ctx = Depends(require("view_sales"))):
-    return await I.employees_perf(ctx.org_id, days)
+    return await I.employees_perf(ctx.org_id, max(7, min(days, 365)))
 
 
 @router.get("/branches")

@@ -37,7 +37,7 @@ async def forecast(product_id: str | None = None, category_id: str | None = None
 
 @router.get("/insights/reorder")
 async def reorder(cover_days: int = 14, branch_id: str | None = None, ctx: Ctx = Depends(require("view_dashboard"))):
-    return await I.reorder(ctx.org_id, cover_days, branch_id)
+    return await I.reorder(ctx.org_id, max(1, min(cover_days, 90)), branch_id)
 
 
 class POLine(BaseModel):
@@ -59,6 +59,17 @@ async def send_po(p: POIn, ctx: Ctx = Depends(require("send_supplier_email"))):
     sup = await db.fetchrow("select * from suppliers where id=$1 and org_id=$2", p.supplier_id, ctx.org_id)
     if not sup:
         raise HTTPException(404, "Supplier not found")
+    # فحص دفعة واحدة لكل فروع الطلب قبل أي كتابة. المفتاح الأجنبي يفرض
+    # الوجود فقط، فبدون هذا، فرع من مؤسسة أخرى يمرّ إلى purchases وإلى
+    # الإيميل الصادر للمورّد.
+    requested_bids = {l.branch_id for l in p.lines}
+    if requested_bids:
+        owned = {r["id"] for r in await db.fetch(
+            "select id from branches where org_id=$1 and id = any($2::uuid[])",
+            ctx.org_id, list(requested_bids))}
+        unknown = requested_bids - {str(b) for b in owned}
+        if unknown:
+            raise HTTPException(404, "Branch not found")
     org = await db.fetchrow("select name, name_ar from organizations where id=$1", ctx.org_id)
     by_branch: dict[str, list[POLine]] = {}
     for l in p.lines:
@@ -74,13 +85,18 @@ async def send_po(p: POIn, ctx: Ctx = Depends(require("send_supplier_email"))):
             rows = []
             for l in lines:
                 pr = await c.fetchrow("select name, name_ar, cost from products where id=$1 and org_id=$2", l.product_id, ctx.org_id)
+                if not pr:
+                    # كان يُنتج 500 عبر pr["cost"]. 404 أوضح وأدقّ للمتصل.
+                    raise HTTPException(404, "Product not found")
                 lt = round(l.quantity * pr["cost"], 3)
                 total += lt
                 rows.append((pr, l.quantity, lt))
                 await c.execute("insert into purchase_items(org_id,purchase_id,product_id,quantity,unit_cost,line_total) values($1,$2,$3,$4,$5,$6)",
                                 ctx.org_id, pid, l.product_id, l.quantity, pr["cost"], lt)
             await c.execute("update purchases set total=$2 where id=$1", pid, round(total, 3))
-        branch = await db.fetchrow("select name, name_ar from branches where id=$1", bid)
+        # الفحص المسبق أعلاه يضمن أن هذا الفرع ملك للمتصل، لكن نضيف org_id
+        # كدفاع ثانٍ في حال أُعيدت كتابة الحلقة لاحقاً.
+        branch = await db.fetchrow("select name, name_ar from branches where id=$1 and org_id=$2", bid, ctx.org_id)
         ar = p.locale == "ar"
         table = "".join(f"<tr><td style='padding:6px 8px;border-bottom:1px solid #E2D6C3'>{html.escape(pr['name_ar'] if ar and pr['name_ar'] else pr['name'])}</td>"
                         f"<td style='padding:6px 8px;border-bottom:1px solid #E2D6C3;text-align:center'>{q:g}</td></tr>" for pr, q, lt in rows)
@@ -108,7 +124,9 @@ async def customers(ctx: Ctx = Depends(require("view_dashboard"))):
 
 @router.get("/insights/basket")
 async def basket(days: int = 60, ctx: Ctx = Depends(require("view_dashboard"))):
-    return await I.basket(ctx.org_id, days)
+    # basket تُرجع الآن {"pairs":[...], "coverage":{...}} — لا نلفّها.
+    # قيد days (7..365) من main.
+    return await I.basket(ctx.org_id, max(7, min(days, 365)))
 
 
 class SimIn(BaseModel):
@@ -132,16 +150,19 @@ async def cashflow(weeks: int = 8, opening: float | None = None, ctx: Ctx = Depe
 
 @router.get("/compliance")
 async def compliance(days: int = 90, ctx: Ctx = Depends(require("view_finance"))):
-    return await I.compliance(ctx.org_id, days)
+    return await I.compliance(ctx.org_id, max(7, min(days, 365)))
 
 
 @router.get("/goals")
 async def goals(ctx: Ctx = Depends(require("view_dashboard"))):
     end = await I.data_end(ctx.org_id)
+    # b.org_id=g.org_id و s.org_id=g.org_id يمنعان قراءة اسم أو إيرادات فرع
+    # لا ينتمي إلى مؤسسة المتصل، حتى لو كان صفّ هدف ملوّث قد خُزّن سابقاً
+    # (انظر add_goal أدناه).
     return await db.fetch("""select g.id, g.branch_id, b.name branch, b.name_ar branch_ar, g.metric, g.period_month, g.target,
-        (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.status='completed'
+        (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
            and date_trunc('month', amman_date(s.sold_at)) = g.period_month and amman_date(s.sold_at) <= $2) actual
-        from goals g left join branches b on b.id=g.branch_id where g.org_id=$1 order by g.period_month desc, b.name""", ctx.org_id, end)
+        from goals g left join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 order by g.period_month desc, b.name""", ctx.org_id, end)
 
 
 class GoalIn(BaseModel):
@@ -153,6 +174,12 @@ class GoalIn(BaseModel):
 @router.post("/goals")
 async def add_goal(g: GoalIn, ctx: Ctx = Depends(require("manage_alerts"))):
     m = dt.date.fromisoformat(g.period_month[:7] + "-01")
+    # فحص ملكية الفرع. قيد المفتاح الأجنبي يفرض وجود الفرع لكن لا يفرض
+    # انتماءه لمؤسسة المتصل، ولا توجد سياسة RLS تحمي هذا المسار.
+    owned = await db.fetchval(
+        "select 1 from branches where id=$1 and org_id=$2", g.branch_id, ctx.org_id)
+    if not owned:
+        raise HTTPException(404, "Branch not found")
     await db.execute("delete from goals where org_id=$1 and branch_id=$2 and period_month=$3", ctx.org_id, g.branch_id, m)
     await db.execute("insert into goals(org_id,branch_id,metric,period_month,target) values($1,$2,'revenue',$3,$4)", ctx.org_id, g.branch_id, m, g.target)
     return {"ok": True}

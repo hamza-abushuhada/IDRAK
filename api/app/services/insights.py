@@ -99,9 +99,9 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None) -
     month = end.replace(day=1)
     q_goals = db.fetch("""
         select g.branch_id, b.name, b.name_ar, g.target,
-          (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.status='completed'
+          (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
              and amman_date(s.sold_at) between $2 and $3) actual
-        from goals g join branches b on b.id=g.branch_id where g.org_id=$1 and g.period_month=$2""", org_id, month, end)
+        from goals g join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 and g.period_month=$2""", org_id, month, end)
     cur, prev, series, top, cats, heat, pay, branches, goals = await asyncio.gather(
         kpis(start, end), kpis(pstart, pend), q_series, q_top, q_cats, q_heat, q_pay, q_branches, q_goals)
     for b in branches:
