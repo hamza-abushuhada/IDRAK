@@ -70,10 +70,14 @@ async def create_org(o: OrgIn, user: User = Depends(current_user)):
 
 @router.post("/me/join-demo")
 async def join_demo(user: User = Depends(current_user)):
-    org = await db.fetchval("select id from organizations where slug='al-nashama'")
+    # شرطان: المتجر مُعلَّم is_demo (عمود موجود في organizations)،
+    # والرتبة الممنوحة cashier لا manager. manager يحمل clean_data الذي
+    # يمكّن POST /data/runs/{id}/undo من حذف sales/customers/products.
+    # cashier يسمح بالاستعراض فقط، وهذا كافٍ لهدف العرض التجريبي.
+    org = await db.fetchval("select id from organizations where slug='al-nashama' and is_demo")
     if not org:
         raise HTTPException(404, "Demo data not seeded")
-    await db.execute("insert into memberships(org_id,user_id,role) values($1,$2,'manager') on conflict do nothing", org, user.id)
+    await db.execute("insert into memberships(org_id,user_id,role) values($1,$2,'cashier') on conflict do nothing", org, user.id)
     return {"id": org}
 
 
