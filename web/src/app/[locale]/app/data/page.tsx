@@ -2,7 +2,7 @@
 import { useRouter } from "@/lib/router";
 import { useRef, useState } from "react";
 import clsx from "clsx";
-import { FileSpreadsheet, Link2, Trash2, UploadCloud, Brain, Download } from "lucide-react";
+import { FileSpreadsheet, Link2, Trash2, Brain, Download, Files } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiMutation, useApiQuery } from "@/lib/useApi";
@@ -12,7 +12,7 @@ import { Badge, Button, Input, Spinner } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 import { useSession } from "@/components/app/session";
 
-type Upload = { id: string; file_name: string; source: string; entity: string; row_count: number; status: string; health_before: number | null; health_after: number | null; imported_rows: number | null; created_at: string; uploaded_by_name: string | null; last_run_id: string | null; has_data: boolean };
+type Upload = { id: string; batch_id: string | null; file_name: string; source: string; entity: string; row_count: number; status: string; health_before: number | null; health_after: number | null; imported_rows: number | null; created_at: string; uploaded_by_name: string | null; last_run_id: string | null; has_data: boolean };
 type Rule = { id: string; column_kind: string; match_value: string; replace_value: string; times_applied: number; created_by_name: string | null; created_at: string };
 
 const SAMPLES = [
@@ -47,6 +47,31 @@ export default function DataHub() {
       setBusy(null);
     }
   }
+  async function uploadBatch(selected: File[]) {
+    if (!can("manager")) return toast(tx("Managers and owners can upload data", "رفع البيانات للمدير والمالك بس"), undefined, "info");
+    if (selected.length > 8) return toast(tx("Choose up to 8 files", "اختار لحد 8 ملفات"), undefined, "error");
+    if (selected.some((file) => file.size > 4 * 1024 * 1024)) return toast(tx("Each file must be 4 MB or smaller", "كل ملف لازم يكون 4 ميغا أو أقل"), undefined, "error");
+    setBusy(`0/${selected.length}`);
+    try {
+      const batch = await api<{ id: string }>("/data/batches", { method: "POST" });
+      for (let i = 0; i < selected.length; i += 1) {
+        setBusy(`${i + 1}/${selected.length} · ${selected[i].name}`);
+        const fd = new FormData();
+        fd.append("file", selected[i]);
+        await api(`/data/batches/${batch.id}/files`, { method: "POST", body: fd });
+      }
+      await api(`/data/batches/${batch.id}/finalize`, { method: "POST" });
+      router.push(`/${locale}/app/data/batches/${batch.id}`);
+    } catch (e) {
+      toast(tx("Batch upload failed", "فشل رفع الدفعة"), (e as Error).message, "error");
+      setBusy(null);
+    }
+  }
+  function chooseFiles(list: FileList | null) {
+    const selected = Array.from(list || []);
+    if (selected.length === 1) uploadFile(selected[0]);
+    else if (selected.length > 1) uploadBatch(selected);
+  }
   async function trySample(file: string) {
     const r = await fetch(`/samples/${file}`);
     const b = await r.blob();
@@ -74,18 +99,18 @@ export default function DataHub() {
       <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
         <div data-basira="upload-dropzone"
           onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
-          onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) uploadFile(f); }}
+          onDrop={(e) => { e.preventDefault(); setDrag(false); chooseFiles(e.dataTransfer.files); }}
           onClick={() => !busy && fileRef.current?.click()}
           className={clsx("grain flex cursor-pointer flex-col items-center justify-center rounded-[var(--radius-card)] border-2 border-dashed px-6 py-14 text-center transition",
             drag ? "border-terra bg-terra-soft/40" : "border-sand-2 bg-[#FFFCF7] hover:border-terra/50")}>
-          <input ref={fileRef} type="file" accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => e.target.files?.[0] && uploadFile(e.target.files[0])} />
+          <input ref={fileRef} type="file" multiple accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => chooseFiles(e.target.files)} />
           {busy && busy !== "sheet" ? (
             <><Spinner size={28} /><p className="mt-4 font-serif text-lg text-ink">{tx("Reading", "عم نقرأ")} {busy}…</p><p className="mt-1 text-sm text-ink-3">{tx("Detecting columns (Arabic & English) and mapping them with AI", "عم نكتشف الأعمدة (عربي وإنجليزي) ونربطها بالذكاء الاصطناعي")}</p></>
           ) : (
             <>
-              <span className="grid size-14 place-items-center rounded-full bg-terra-soft text-terra"><UploadCloud size={26} /></span>
-              <p className="mt-4 font-serif text-[22px] text-ink">{tx("Drop an Excel or CSV file", "اسحب ملف إكسل أو CSV هون")}</p>
-              <p className="mt-1 text-sm text-ink-3">{tx("or click to choose · up to 15 MB · sales, products, customers or supplier lists", "أو اضغط للاختيار · لحد 15 ميغا · مبيعات، أصناف، زبائن أو قوائم موردين")}</p>
+              <span className="grid size-14 place-items-center rounded-full bg-terra-soft text-terra"><Files size={26} /></span>
+              <p className="mt-4 font-serif text-[22px] text-ink">{tx("Drop one file or a related batch", "اسحب ملف واحد أو مجموعة ملفات مرتبطة")}</p>
+              <p className="mt-1 text-sm text-ink-3">{tx("Choose up to 8 files · 4 MB each · Idrak links shared data before import", "اختار لحد 8 ملفات · 4 ميغا للملف · إدراك بيربط البيانات المشتركة قبل الاستيراد")}</p>
             </>
           )}
         </div>
@@ -113,7 +138,7 @@ export default function DataHub() {
 
       <Section id="upload-history" className="mt-6" title={tx("Upload history", "سجل الملفات")} bodyClass="p-0">
         <Table rows={uploads.data} empty={tx("No uploads yet — drop your first file above.", "ما في ملفات لسا — ارفع أول ملف فوق.")}
-          onRow={(u) => (u.last_run_id ? router.push(`/${locale}/app/data/runs/${u.last_run_id}`) : u.has_data && router.push(`/${locale}/app/data/uploads/${u.id}`))}
+          onRow={(u) => u.batch_id ? router.push(`/${locale}/app/data/batches/${u.batch_id}`) : (u.last_run_id ? router.push(`/${locale}/app/data/runs/${u.last_run_id}`) : u.has_data && router.push(`/${locale}/app/data/uploads/${u.id}`))}
           cols={[
             { key: "file", label: tx("File", "الملف"), render: (u) => <span className="font-medium text-ink">{u.file_name}</span> },
             { key: "entity", label: tx("Type", "النوع"), render: (u) => <span className="text-ink-2">{({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد") } as Record<string, string>)[u.entity] || u.entity}</span> },
