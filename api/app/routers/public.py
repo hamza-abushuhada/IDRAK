@@ -63,15 +63,20 @@ async def contact(c: Contact):
 @router.post("/health-check")
 async def health_check(file: UploadFile = File(...)):
     data = await file.read()
-    if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(413, "File too large (max 5MB)")
+    # حدود مقلّصة للمسار المجهول. cleaning/engine.cluster_values يقارن كل
+    # قيمة مميّزة بكل مجموعة متراكمة في ٦ أنواع أعمدة، أي O(n²) على عدد
+    # القيم المميّزة. حتى 5000 صفّ بقيم مميّزة تماماً يمكن أن تُكلّف ثواني
+    # على المعالج. 2MB / 1000 صفّ يبقيان الميزة عاملة لفحص صحّة البيانات
+    # السريع، ويرفعان حدّ أسوأ حالة إلى ما يستطيع حدّ المعدّل احتواءه فعلاً.
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 2MB)")
     try:
         headers, rows, _ = read_table(file.filename or "file.csv", data)
     except Exception as e:
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers or not rows:
         raise HTTPException(422, "The file looks empty")
-    rows = rows[:5000]
+    rows = rows[:1000]
     mapping = {h: m["field"] for h, m in auto_map(headers).items()}
     res = engine.run(headers, rows, mapping)
     await db.execute("insert into health_checks(file_name,row_count,score) values($1,$2,$3)", file.filename, len(rows), res["score_before"]["score"])
