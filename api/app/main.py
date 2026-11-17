@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from collections import defaultdict, deque
+import os
 import time
 
 from fastapi import FastAPI, Request
@@ -43,11 +44,23 @@ _public_rate_limits = {
 _public_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
+# قائمة عناوين الوكلاء الموثوقين. فقط من هذه العناوين تُقرأ X-Forwarded-For.
+# على Vercel اضبط TRUSTED_PROXY_IPS بعناوين حافة Vercel، أو اتركها فارغة
+# لاستخدام عنوان الاتصال المباشر فقط (أشدّ لكن قد يرى كل الطلبات تأتي من
+# بوابة واحدة). أمثلة: "76.76.21.0/24,127.0.0.1".
+_TRUSTED_PROXIES = frozenset(
+    p.strip() for p in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if p.strip())
+
+
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:64]
-    return (request.client.host if request.client else "unknown")[:64]
+    peer = (request.client.host if request.client else "unknown")
+    if peer in _TRUSTED_PROXIES:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            # نأخذ آخر قفزة قبل الوكيل الموثوق، لا أول قفزة التي تحدّدها
+            # ترويسة العميل. كل ما قبلها قد يكون مزوّراً من المتصل.
+            return forwarded.split(",")[-1].strip()[:64]
+    return peer[:64]
 
 
 @app.middleware("http")
