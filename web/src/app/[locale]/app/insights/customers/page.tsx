@@ -11,17 +11,19 @@ import { ShareBar, copyText } from "@/components/insights/common";
 import type { Rfm, RfmCustomer } from "@/components/insights/types";
 
 const SEG: Record<string, { tone: "olive" | "terra" | "saffron" | "sky" | "neutral" | "danger"; whoEn: string; whoAr: string; doEn: string; doAr: string }> = {
-  champions: { tone: "olive", whoEn: "Visit often, spend the most, came recently.", whoAr: "بيجوا كثير، بيصرفوا أكثر إشي، وآخر زيارة قريبة.",
+  champions: { tone: "olive", whoEn: "8+ visits or 150+ JD in the last 90 days.", whoAr: "8 زيارات أو 150 د.أ فأكثر آخر 90 يوم.",
     doEn: "Thank them — early access to Ramadan offers, a small loyalty gift.", doAr: "اشكرهم — عروض رمضان قبل غيرهم، أو هدية ولاء صغيرة." },
-  loyal: { tone: "sky", whoEn: "Come regularly with a steady basket.", whoAr: "بيجوا بانتظام وسلّتهم ثابتة.",
+  loyal: { tone: "sky", whoEn: "4+ visits in the last 90 days.", whoAr: "4 زيارات فأكثر آخر 90 يوم.",
     doEn: "Suggest bundles to grow the basket (see “Bought together”).", doAr: "اقترح عليهم عروض مجمّعة تكبّر السلة (شوف «بيننباعوا مع بعض»)." },
-  at_risk: { tone: "danger", whoEn: "Used to be regulars, haven't been back lately.", whoAr: "كانوا زباين دايمين، وصارلهم فترة ما إجوا.",
+  at_risk: { tone: "danger", whoEn: "Had 5+ visits before, but no visit for 30+ days.", whoAr: "كان عندهم 5 زيارات أو أكثر، وما إجوا من أكثر من شهر.",
     doEn: "Send a personal win-back message this week.", doAr: "ابعثلهم رسالة شخصية ترجّعهم هالأسبوع." },
-  new: { tone: "saffron", whoEn: "First few visits.", whoAr: "أول كم زيارة إلهم.",
+  new: { tone: "saffron", whoEn: "First purchase within 30 days, up to 3 visits so far.", whoAr: "أول شراء خلال 30 يوم، مع 3 زيارات أو أقل.",
     doEn: "Make the second visit easy — a welcome offer.", doAr: "سهّل عليهم الزيارة الثانية — عرض ترحيبي." },
-  regular: { tone: "neutral", whoEn: "Occasional shoppers.", whoAr: "بيتسوقوا من وقت لوقت.",
+  awaiting: { tone: "neutral", whoEn: "Registered but no purchase yet.", whoAr: "مسجَّلين، بس ما شروا لحد الآن.",
+    doEn: "Send a welcome message with a first-visit offer.", doAr: "ابعثلهم رسالة ترحيب مع عرض لأول زيارة." },
+  regular: { tone: "neutral", whoEn: "2-3 visits in the last 90 days.", whoAr: "2 أو 3 زيارات آخر 90 يوم.",
     doEn: "Keep them in your weekly offers.", doAr: "خلّيهم ضمن عروضك الأسبوعية." },
-  lost: { tone: "neutral", whoEn: "No visit in more than 75 days.", whoAr: "ما إجوا من أكثر من 75 يوم.",
+  lost: { tone: "neutral", whoEn: "No visit for more than 90 days.", whoAr: "ما إجوا من أكثر من 90 يوم.",
     doEn: "One last offer; don't spend much here.", doAr: "عرض أخير، وما تصرف عليهم كثير." },
 };
 

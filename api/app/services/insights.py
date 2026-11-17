@@ -128,13 +128,20 @@ async def leaks(org_id: str) -> list[dict]:
     end = await data_end(org_id)
     out: list[dict] = []
 
+    # المخزون الراكد. ثلاثة شروط مطلقة:
+    # 1. المنتج موجود في الكاتالوج منذ ≥ 60 يوماً — منتج أدخلته أمس ليس
+    #    "راكداً" مهما بلغ رصيده.
+    # 2. قيمة المخزون > 5 د.أ — نتجاهل الأصناف الرخيصة جداً.
+    # 3. مبيعات آخر 60 يوماً ≤ 5% من الرصيد أو ≤ 3 قطع. الشرط الثاني
+    #    يمسك المنتج بالرصيد الضخم الذي باع صفراً حتى لو 5% = 50 قطعة.
     dead = await db.fetch("""
         select p.id, p.name, p.name_ar, sum(il.quantity) stock, sum(il.quantity*p.cost) value,
           coalesce((select sum(si.quantity) from sale_items si join sales s on s.id=si.sale_id
                     where si.product_id=p.id and s.status='completed' and amman_date(s.sold_at) > $2::date - 60),0) sold60
         from inventory_levels il join products p on p.id=il.product_id
-        where il.org_id=$1 and il.quantity > 0 group by 1,2,3 having sum(il.quantity*p.cost) > 5""", org_id, end)
-    dead = [d for d in dead if d["sold60"] <= max(1, d["stock"] * 0.05)]
+        where il.org_id=$1 and il.quantity > 0 and p.created_at < now() - interval '60 days'
+        group by 1,2,3 having sum(il.quantity*p.cost) > 5""", org_id, end)
+    dead = [d for d in dead if d["sold60"] <= max(1, d["stock"] * 0.05) or d["sold60"] <= 3]
     if dead:
         val = sum(d["value"] for d in dead)
         dead.sort(key=lambda d: -d["value"])
@@ -395,64 +402,130 @@ async def reorder(org_id: str, cover_days: int = 14, branch_id: str | None = Non
 @db.cached(300)
 async def rfm(org_id: str) -> dict:
     end = await data_end(org_id)
+    # LEFT JOIN عشان الزبائن المسجّلين اللي ما اشتروا بعد يظهروا — كانوا
+    # يختفون كلياً مع JOIN العادي. created_at تُستخدم لتمييز "بانتظار أول
+    # شراء" عن "جديد". الحدث الاكتسابي = created_at. المبيعات المُلغاة
+    # (void) تُستبعد من lifetime_tx و lifetime لأن الزبون الذي ألغى
+    # ليس زبوناً.
     rows = await db.fetch("""
         select c.id, c.full_name, c.full_name_ar, c.phone, c.area, c.loyalty_points,
-               max(amman_date(s.sold_at)) last_visit, count(*) filter (where amman_date(s.sold_at) > $2::date - 180) freq,
-               coalesce(sum(s.total) filter (where amman_date(s.sold_at) > $2::date - 180),0) monetary, count(*) lifetime_tx, sum(s.total) lifetime
-        from customers c join sales s on s.customer_id=c.id and s.status='completed'
-        where c.org_id=$1 group by 1,2,3,4,5,6""", org_id, end)
+               c.created_at,
+               max(amman_date(s.sold_at)) filter (where s.status='completed') last_visit,
+               count(*) filter (where s.status='completed' and amman_date(s.sold_at) > $2::date - 90) freq_90,
+               coalesce(sum(s.total) filter (where s.status='completed' and amman_date(s.sold_at) > $2::date - 90),0) monetary_90,
+               count(*) filter (where s.status='completed') lifetime_tx,
+               coalesce(sum(s.total) filter (where s.status='completed'),0) lifetime
+        from customers c left join sales s on s.customer_id=c.id
+        where c.org_id=$1 group by 1,2,3,4,5,6,7""", org_id, end)
     if not rows:
-        return {"segments": [], "customers": [], "at_risk": []}
+        return {"segments": [], "customers": [], "at_risk": [], "coverage": {"total": 0, "active": 0, "qualifies_for_segments": False}}
 
-    def q(vals, v):
-        s = sorted(vals)
-        return 1 + sum(1 for x in (s[len(s) // 5], s[2 * len(s) // 5], s[3 * len(s) // 5], s[4 * len(s) // 5]) if v > x)
-    rec = [(end - dt.date.fromisoformat(r["last_visit"])).days for r in rows]
-    freqs = [r["freq"] for r in rows]
-    mons = [r["monetary"] for r in rows]
-    seg_names = {"champions": ("Champions", "الأبطال"), "loyal": ("Loyal", "الأوفياء"), "at_risk": ("At risk", "معرّضين للخسارة"),
-                 "new": ("New", "جداد"), "lost": ("Lost", "خسرناهم"), "regular": ("Regular", "عاديين")}
+    # الحدّ الأدنى لتفعيل التجزئة. تحت 20 زبون، نسبة واحد غلط تقلب الأرقام.
+    # نُرجع الزبائن كقائمة مسطّحة بدل محاولة تقسيمهم.
+    active = sum(1 for r in rows if r["last_visit"] is not None)
+    MIN_FOR_SEGMENTS = 20
+
+    seg_names = {
+        "champions": ("Champions", "الأبطال"),
+        "loyal": ("Loyal", "الأوفياء"),
+        "at_risk": ("At risk", "معرّضين للخسارة"),
+        "new": ("New", "جداد"),
+        "awaiting": ("Awaiting first visit", "بانتظار أول شراء"),
+        "lost": ("Lost", "خسرناهم"),
+        "regular": ("Regular", "عاديين"),
+    }
+    # عتبات مطلقة، معايَرة لمتجر أردني صغير (ميني ماركت/صيدلية/كافيه).
+    # ليست نسبية إلى بقية الزبائن — نفس السلوك يعطي نفس التصنيف في أي محل.
     out = []
-    for r, rd in zip(rows, rec):
-        R = 6 - q(rec, rd)
-        F, M = q(freqs, r["freq"]), q(mons, r["monetary"])
-        if R >= 4 and F >= 4:
-            seg = "champions"
-        elif rd > 75:
+    for r in rows:
+        last = r["last_visit"]
+        rd = (end - dt.date.fromisoformat(last)).days if last else None
+        acquired_days = (end - r["created_at"].date()).days if r["created_at"] else None
+        if last is None:
+            # لم يشترِ قطّ. ثلاث حالات: مُسجَّل حديثاً (بانتظار)، أو جديد
+            # متأخّر، أو لم نحسبه. created_at دائماً موجود (NOT NULL).
+            seg = "awaiting" if acquired_days is not None and acquired_days > 7 else "new"
+        elif rd > 90:
             seg = "lost"
-        elif R <= 2 and F >= 3 or (rd > 30 and r["lifetime_tx"] >= 25):
+        elif rd > 30 and r["lifetime_tx"] >= 5:
+            # اعتاد يجي وغاب شهر — تحذير قبل أن يصير "خسران".
             seg = "at_risk"
-        elif F >= 4:
+        elif r["freq_90"] >= 8 or float(r["monetary_90"] or 0) >= 150:
+            # زيارة بالأسبوع على الأقل، أو إنفاق ≥ 150 د.أ في 90 يوم.
+            seg = "champions"
+        elif r["freq_90"] >= 4:
             seg = "loyal"
-        elif r["lifetime_tx"] <= 3:
+        elif acquired_days is not None and acquired_days <= 30 and r["lifetime_tx"] <= 3:
             seg = "new"
+        elif r["freq_90"] >= 2:
+            seg = "regular"
         else:
             seg = "regular"
-        out.append({**r, "recency_days": rd, "R": R, "F": F, "M": M, "segment": seg, "monetary": _r(r["monetary"]), "lifetime": _r(r["lifetime"])})
+        out.append({
+            **{k: v for k, v in r.items() if k != "created_at"},
+            "recency_days": rd,
+            "acquired_days": acquired_days,
+            "freq": r["freq_90"],
+            "monetary": _r(r["monetary_90"]),
+            "lifetime": _r(r["lifetime"]),
+            "segment": seg,
+        })
+
     segs = defaultdict(lambda: {"count": 0, "revenue": 0.0})
     for c in out:
         segs[c["segment"]]["count"] += 1
-        segs[c["segment"]]["revenue"] += c["monetary"]
-    segments = [{"key": k, "en": seg_names[k][0], "ar": seg_names[k][1], "count": v["count"], "revenue": round(v["revenue"], 2)} for k, v in segs.items()]
-    at_risk = sorted([c for c in out if c["segment"] == "at_risk"], key=lambda c: -c["lifetime"])
-    return {"segments": sorted(segments, key=lambda s: -s["revenue"]), "customers": sorted(out, key=lambda c: -c["monetary"]), "at_risk": at_risk[:30]}
+        segs[c["segment"]]["revenue"] += c["monetary"] or 0
+    segments = [{"key": k, "en": seg_names[k][0], "ar": seg_names[k][1],
+                 "count": v["count"], "revenue": round(v["revenue"], 2)}
+                for k, v in segs.items()]
+    at_risk = sorted([c for c in out if c["segment"] == "at_risk"],
+                     key=lambda c: -(c["lifetime"] or 0))
+
+    coverage = {
+        "total": len(rows),
+        "active": active,
+        "qualifies_for_segments": active >= MIN_FOR_SEGMENTS,
+        "min_customers_for_segments": MIN_FOR_SEGMENTS,
+    }
+    return {"segments": sorted(segments, key=lambda s: -s["revenue"]),
+            "customers": sorted(out, key=lambda c: -(c["monetary"] or 0)),
+            "at_risk": at_risk[:30],
+            "coverage": coverage}
 
 
 @db.cached(600)
-async def basket(org_id: str, days: int = 60) -> list[dict]:
+async def basket(org_id: str, days: int = 60) -> dict:
     end = await data_end(org_id)
+    # عتبة مرنة حسب حجم المحل. الثابت ≥ 25 كان يخلي أي محل بأقل من 500
+    # فاتورة يعرض شاشة فارغة. نقرأ عدد الفواتير أولاً ونعيّر العتبة:
+    # - أقلّ من 100 فاتورة: بيانات غير كافية.
+    # - 100-500:  threshold = 5
+    # - > 500:    threshold = max(10, 1% من الفواتير)
+    n_sales = await db.fetchval("""
+        select count(*) from sales where org_id=$1 and status='completed'
+          and amman_date(sold_at) > $2::date - $3::int""", org_id, end, days)
+    if (n_sales or 0) < 100:
+        return {"pairs": [], "coverage": {"sales": n_sales or 0, "min_sales": 100,
+                                          "qualifies": False}}
+    threshold = 5 if n_sales < 500 else max(10, int(n_sales * 0.01))
     rows = await db.fetch("""
         with s as (select id from sales where org_id=$1 and status='completed' and amman_date(sold_at) > $2::date - $3::int),
              it as (select distinct si.sale_id, si.product_id from sale_items si join s on s.id=si.sale_id),
              n as (select count(*)::float n from s),
              pc as (select product_id, count(*) c from it group by 1),
-             pairs as (select a.product_id a, b.product_id b, count(*) ab from it a join it b on a.sale_id=b.sale_id and a.product_id < b.product_id group by 1,2 having count(*) >= 25)
+             pairs as (select a.product_id a, b.product_id b, count(*) ab from it a join it b on a.sale_id=b.sale_id and a.product_id < b.product_id group by 1,2 having count(*) >= $4)
         select pa.name a_name, pa.name_ar a_name_ar, pb.name b_name, pb.name_ar b_name_ar, pairs.ab together,
                pairs.ab / n.n support, pairs.ab::float / pca.c conf_ab, (pairs.ab * n.n) / (pca.c * pcb.c) lift
         from pairs cross join n join pc pca on pca.product_id=pairs.a join pc pcb on pcb.product_id=pairs.b
         join products pa on pa.id=pairs.a join products pb on pb.id=pairs.b
-        order by lift desc limit 20""", org_id, end, days)
-    return [{**r, "support": _r(r["support"] * 100, 2), "conf_ab": _r(r["conf_ab"] * 100, 1), "lift": _r(r["lift"], 2)} for r in rows]
+        order by lift desc limit 20""", org_id, end, days, threshold)
+    return {
+        "pairs": [{**r, "support": _r(r["support"] * 100, 2),
+                   "conf_ab": _r(r["conf_ab"] * 100, 1),
+                   "lift": _r(r["lift"], 2)} for r in rows],
+        "coverage": {"sales": n_sales, "min_sales": 100,
+                     "threshold": threshold, "qualifies": True},
+    }
 
 
 async def simulate(org_id: str, product_ids: list[str] | None, category_id: str | None, price_pct: float, cost_pct: float, discount_pct: float, elasticity: float = -1.3) -> dict:

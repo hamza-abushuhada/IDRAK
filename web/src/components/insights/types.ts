@@ -45,10 +45,12 @@ export type POResult = { ok: boolean; purchase_orders: { id: string; po_number: 
 
 export type Segment = { key: string; en: string; ar: string; count: number; revenue: number };
 export type RfmCustomer = {
-  id: string; full_name: string; full_name_ar: string | null; phone: string | null; area: string | null; recency_days: number;
-  freq: number; monetary: number; lifetime: number; lifetime_tx: number; segment: string; last_visit: string;
+  id: string; full_name: string; full_name_ar: string | null; phone: string | null; area: string | null;
+  recency_days: number | null; acquired_days: number | null;
+  freq: number; monetary: number; lifetime: number; lifetime_tx: number; segment: string; last_visit: string | null;
 };
-export type Rfm = { segments: Segment[]; customers: RfmCustomer[]; at_risk: RfmCustomer[] };
+export type RfmCoverage = { total: number; active: number; qualifies_for_segments: boolean; min_customers_for_segments: number };
+export type Rfm = { segments: Segment[]; customers: RfmCustomer[]; at_risk: RfmCustomer[]; coverage?: RfmCoverage };
 
 export type Pair = { a_name: string; a_name_ar: string | null; b_name: string; b_name_ar: string | null; together: number; support: number; conf_ab: number; lift: number };
 

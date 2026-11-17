@@ -108,7 +108,7 @@ async def customers(ctx: Ctx = Depends(require("view_dashboard"))):
 
 @router.get("/insights/basket")
 async def basket(days: int = 60, ctx: Ctx = Depends(require("view_dashboard"))):
-    return {"pairs": await I.basket(ctx.org_id, days)}
+    return await I.basket(ctx.org_id, days)
 
 
 class SimIn(BaseModel):
