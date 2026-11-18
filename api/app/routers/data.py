@@ -486,6 +486,20 @@ def _money(v) -> Decimal | None:
         return None
 
 
+class SkippedRow(Exception):
+    """تُرفع داخليّاً لتخطّي صفّ واحد أثناء الاستيراد مع الاحتفاظ بالسبب.
+
+    ترفع HTTPException كانت توقف الملف كاملاً عند أول غلط. SkippedRow
+    تُلتقط في حلقة الصفوف، تُسجَّل، ويكمل الاستيراد.
+    """
+
+    def __init__(self, reason: str, reason_ar: str, row_index: int | None = None):
+        self.reason = reason
+        self.reason_ar = reason_ar
+        self.row_index = row_index
+        super().__init__(reason)
+
+
 @router.post("/runs/{run_id}/apply")
 async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     run = await db.fetchrow("""select r.*, u.columns, u.mapping, u.entity, u.file_name, u.batch_id, b.contract as batch_contract
@@ -518,6 +532,20 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     upload_id = run["upload_id"]
     entity = run["entity"]
     stats = {"sales": 0, "lines": 0, "customers": 0, "products_created": 0, "products_updated": 0}
+    # الصفوف المتخطّاة: لا نرفض الملف، نجمعها ونعرضها للمستخدم.
+    skipped: list[dict] = []
+
+    def _skip(row_index: int | None, row_data, reason: str, reason_ar: str):
+        snapshot = {}
+        if row_data is not None:
+            for h in headers:
+                try:
+                    val = row_data[headers.index(h)] if headers.index(h) < len(row_data) else ""
+                    if val:
+                        snapshot[h] = str(val)[:120]
+                except (ValueError, IndexError):
+                    continue
+        skipped.append({"row": row_index, "reason": reason, "reason_ar": reason_ar, "data": snapshot})
     async with db.transaction() as c:
         branches = {match_key(b["name"]): b["id"] for b in await c.fetch("select id,name from branches where org_id=$1", ctx.org_id)}
         emps = {match_key(e["full_name"]): e["id"] for e in await c.fetch("select id, full_name from employees where org_id=$1", ctx.org_id)}
@@ -548,10 +576,16 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                     ctx.org_id, existing["id"], name)
                 return existing["id"], existing["cost"]
             if cost is None:
-                raise HTTPException(422, f"Unknown product has no cost: {name}. Add it to the catalog or include a cost column")
+                raise SkippedRow(
+                    f"Unknown product has no cost: {name}. Add it to the catalog or include a cost column",
+                    f"صنف جديد بدون تكلفة: {name}. أضفه للكتالوج أو ضمّن عمود تكلفة",
+                )
             cost = _money(cost)
             if cost is None or cost < 0:
-                raise HTTPException(422, f"Invalid cost for new product: {name}")
+                raise SkippedRow(
+                    f"Invalid cost for new product: {name}",
+                    f"تكلفة غير صالحة لصنف جديد: {name}",
+                )
             stored_barcode = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
             pid = await c.fetchval("""insert into products(org_id,name,sku,barcode,price,cost,upload_id) values($1,$2,$3,$4,$5,$6,$7) returning id""",
                                    ctx.org_id, name, sku, stored_barcode, price or 0, cost, upload_id)
@@ -565,85 +599,98 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         if entity == "sales":
             sale_recs, item_recs = [], []
             groups = defaultdict(list)
-            for r in rows:
+            for ri, r in enumerate(rows):
                 invoice = g(r, "invoice_number")
                 if not invoice:
-                    raise HTTPException(422, "Sales import requires an invoice_number column; rows cannot be grouped safely without it")
-                key = (invoice, (g(r, "date") or "")[:10], match_key(g(r, "branch") or ""))
-                groups[key].append(r)
-            for _, lines in groups.items():
-                r0 = lines[0]
-                inv = g(r0, "invoice_number")
-                ds = g(r0, "date")
-                if not ds:
-                    raise HTTPException(422, "Sales import contains a missing date")
-                try:
-                    sold = dt.datetime.fromisoformat(ds)
-                except ValueError as exc:
-                    raise HTTPException(422, f"Sales import contains an invalid date: {ds}") from exc
-                sold = sold.replace(tzinfo=dt.timezone(dt.timedelta(hours=3)))
-                branch_name = g(r0, "branch")
-                br = branches.get(match_key(branch_name or ""))
-                if branch_name and br is None:
-                    raise HTTPException(422, f"Unknown branch: {branch_name}")
-                emp = emps.get(match_key(g(r0, "cashier") or ""))
-                cust = custs.get(g(r0, "phone") or "")
-                items, subtotal = [], Decimal("0")
-                for r in lines:
-                    name = g(r, "product")
-                    q = _num(g(r, "quantity"))
-                    p = _num(g(r, "unit_price"))
-                    t = _num(g(r, "total"))
-                    cost = _num(g(r, "cost"))
-                    if not name or q is None or q <= 0 or q > 200:
-                        continue
-                    if p is None and t is not None:
-                        p = t / q
-                    if p is None:
-                        continue
-                    price = _money(p)
-                    if price is None:
-                        raise HTTPException(422, f"Invalid unit price for invoice {inv}: {p}")
-                    pid, cost = await product_id(name, price, cost, g(r, "barcode"), g(r, "sku"))
-                    lt = (Decimal(str(q)) * price).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-                    subtotal += lt
-                    items.append((pid, Decimal(str(q)), price, cost, lt))
-                if not items:
+                    _skip(ri, r, "Row has no invoice number",
+                          "الصفّ بدون رقم فاتورة")
                     continue
-                sid = uuid.uuid4()
-                pm = g(r0, "payment_method")
-                if pm not in ("cash", "card", "cliq", "wallet"):
-                    raise HTTPException(422, f"Unknown or missing payment method: {pm or '<empty>'}")
-                contract = run["batch_contract"] or {}
-                discount = _money(g(r0, "discount") or 0) or Decimal("0")
-                tax_mode = contract.get("tax_mode", "none")
-                rate = Decimal(str(contract.get("tax_rate") or 0)) / Decimal("100")
-                if tax_mode == "from_file":
-                    tax = _money(g(r0, "tax"))
-                    if tax is None:
-                        raise HTTPException(422, f"Invoice {inv} is missing its tax value")
-                    net_subtotal, total = subtotal, subtotal - discount + tax
-                elif tax_mode == "excluded":
-                    net_subtotal = subtotal
-                    tax = ((subtotal - discount) * rate).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-                    total = subtotal - discount + tax
-                elif tax_mode == "included":
-                    gross = subtotal - discount
-                    tax = (gross - gross / (Decimal("1") + rate)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP) if rate else Decimal("0")
-                    net_subtotal = gross - tax + discount
-                    total = gross
-                else:
-                    net_subtotal, tax, total = subtotal, Decimal("0"), subtotal - discount
-                sale_recs.append((sid, uuid.UUID(str(ctx.org_id)), br, emp, cust, inv, sold, net_subtotal, discount, tax,
-                                  total, pm, "completed", upload_id))
-                item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), sid, pid, q, p, cost, Decimal("0"), lt) for pid, q, p, cost, lt in items)
-                stats["sales"] += 1
-                stats["lines"] += len(items)
-            await c.copy_records_to_table("sales", records=sale_recs, columns=["id", "org_id", "branch_id", "employee_id", "customer_id", "invoice_number", "sold_at",
-                                                                               "subtotal", "discount", "tax", "total", "payment_method", "status", "upload_id"])
-            await c.copy_records_to_table("sale_items", records=item_recs, columns=["id", "org_id", "sale_id", "product_id", "quantity", "unit_price", "unit_cost", "discount", "line_total"])
+                key = (invoice, (g(r, "date") or "")[:10], match_key(g(r, "branch") or ""))
+                groups[key].append((ri, r))
+            for _, lines in groups.items():
+                ri0, r0 = lines[0]
+                try:
+                    inv = g(r0, "invoice_number")
+                    ds = g(r0, "date")
+                    if not ds:
+                        raise SkippedRow(f"Invoice {inv} has no date",
+                                         f"الفاتورة {inv} بدون تاريخ", ri0)
+                    try:
+                        sold = dt.datetime.fromisoformat(ds)
+                    except ValueError as exc:
+                        raise SkippedRow(f"Invoice {inv} has an invalid date: {ds}",
+                                         f"الفاتورة {inv} فيها تاريخ غير صالح: {ds}", ri0) from exc
+                    sold = sold.replace(tzinfo=dt.timezone(dt.timedelta(hours=3)))
+                    branch_name = g(r0, "branch")
+                    br = branches.get(match_key(branch_name or ""))
+                    if branch_name and br is None:
+                        raise SkippedRow(f"Unknown branch: {branch_name}",
+                                         f"فرع غير معروف: {branch_name}", ri0)
+                    emp = emps.get(match_key(g(r0, "cashier") or ""))
+                    cust = custs.get(g(r0, "phone") or "")
+                    items, subtotal = [], Decimal("0")
+                    for _ri, r in lines:
+                        name = g(r, "product")
+                        q = _num(g(r, "quantity"))
+                        p = _num(g(r, "unit_price"))
+                        t = _num(g(r, "total"))
+                        cost = _num(g(r, "cost"))
+                        if not name or q is None or q <= 0 or q > 200:
+                            continue
+                        if p is None and t is not None:
+                            p = t / q
+                        if p is None:
+                            continue
+                        price = _money(p)
+                        if price is None:
+                            raise SkippedRow(f"Invoice {inv}: invalid unit price {p}",
+                                             f"الفاتورة {inv}: سعر وحدة غير صالح {p}", ri0)
+                        pid, cost = await product_id(name, price, cost, g(r, "barcode"), g(r, "sku"))
+                        lt = (Decimal(str(q)) * price).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                        subtotal += lt
+                        items.append((pid, Decimal(str(q)), price, cost, lt))
+                    if not items:
+                        continue
+                    sid = uuid.uuid4()
+                    pm = g(r0, "payment_method")
+                    if pm not in ("cash", "card", "cliq", "wallet"):
+                        raise SkippedRow(f"Invoice {inv}: unknown or missing payment method ({pm or 'empty'})",
+                                         f"الفاتورة {inv}: طريقة دفع غير معروفة أو مفقودة ({pm or 'فارغ'})", ri0)
+                    contract = run["batch_contract"] or {}
+                    discount = _money(g(r0, "discount") or 0) or Decimal("0")
+                    tax_mode = contract.get("tax_mode", "none")
+                    rate = Decimal(str(contract.get("tax_rate") or 0)) / Decimal("100")
+                    if tax_mode == "from_file":
+                        tax = _money(g(r0, "tax"))
+                        if tax is None:
+                            raise SkippedRow(f"Invoice {inv} is missing its tax value",
+                                             f"الفاتورة {inv} ينقصها قيمة الضريبة", ri0)
+                        net_subtotal, total = subtotal, subtotal - discount + tax
+                    elif tax_mode == "excluded":
+                        net_subtotal = subtotal
+                        tax = ((subtotal - discount) * rate).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                        total = subtotal - discount + tax
+                    elif tax_mode == "included":
+                        gross = subtotal - discount
+                        tax = (gross - gross / (Decimal("1") + rate)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP) if rate else Decimal("0")
+                        net_subtotal = gross - tax + discount
+                        total = gross
+                    else:
+                        net_subtotal, tax, total = subtotal, Decimal("0"), subtotal - discount
+                    sale_recs.append((sid, uuid.UUID(str(ctx.org_id)), br, emp, cust, inv, sold, net_subtotal, discount, tax,
+                                      total, pm, "completed", upload_id))
+                    item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), sid, pid, q, p, cost, Decimal("0"), lt) for pid, q, p, cost, lt in items)
+                    stats["sales"] += 1
+                    stats["lines"] += len(items)
+                except SkippedRow as exc:
+                    _skip(exc.row_index if exc.row_index is not None else ri0, r0, exc.reason, exc.reason_ar)
+                    continue
+            if sale_recs:
+                await c.copy_records_to_table("sales", records=sale_recs, columns=["id", "org_id", "branch_id", "employee_id", "customer_id", "invoice_number", "sold_at",
+                                                                                   "subtotal", "discount", "tax", "total", "payment_method", "status", "upload_id"])
+                await c.copy_records_to_table("sale_items", records=item_recs, columns=["id", "org_id", "sale_id", "product_id", "quantity", "unit_price", "unit_cost", "discount", "line_total"])
         elif entity == "customers":
-            for r in rows:
+            for ri, r in enumerate(rows):
                 name, phone = g(r, "customer_name"), g(r, "phone")
                 if not name and not phone:
                     continue
@@ -656,7 +703,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 stats["customers"] += 1
         elif entity in ("products", "supplier_prices"):
             old_costs = []
-            for r in rows:
+            for ri, r in enumerate(rows):
                 name = g(r, "product")
                 if not name:
                     continue
@@ -671,7 +718,11 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         await c.execute("update products set cost=$2 where id=$1", existing["id"], cost)
                         stats["products_updated"] += 1
                 else:
-                    await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
+                    try:
+                        await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
+                    except SkippedRow as exc:
+                        _skip(ri, r, exc.reason, exc.reason_ar)
+                        continue
             stats["old_costs"] = old_costs
         learned = 0
         pairs = {(ch["column_name"], ch["old_value"], ch["new_value"]) for ch in changes if ch["rule"] in MERGE_RULES and ch["status"] != "rejected"}
@@ -686,14 +737,20 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                    on conflict (org_id,column_kind,match_value) do update set times_applied = cleaning_rules.times_applied + 1""", rule_recs)
         await c.execute("update cleaning_changes set status='approved' where run_id=$1 and status='proposed'", run_id)
         imported = stats["sales"] or stats["customers"] or (stats["products_created"] + stats["products_updated"])
+        # نُخزّن الصفوف المتخطّاة في stats حتى يقدر المستخدم ينزّلها كـ CSV.
+        # قد تكون كبيرة، فنقصّها على 500 سبب مع عدّاد كلّي.
+        skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
-                        run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", [])})
+                        run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
+                                 "skipped": skipped_blob})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
-    await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], **{k: v for k, v in stats.items() if k != "old_costs"}})
+    await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
+                                                                                           **{k: v for k, v in stats.items() if k != "old_costs"}})
     await db.execute("insert into notifications(org_id,kind,title,link) values($1,'cleaning',$2,$3)", ctx.org_id,
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
-    return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned}
+    return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned,
+            "skipped": {"count": len(skipped), "sample": skipped[:20]}}
 
 
 @router.post("/runs/{run_id}/undo")
@@ -712,6 +769,46 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.undone", "upload", str(run["upload_id"]))
     return {"ok": True, "sales_removed": int(n1.split()[-1]), "customers_removed": int(n2.split()[-1])}
+
+
+@router.get("/runs/{run_id}/skipped.csv")
+async def skipped_csv(run_id: str, ctx: Ctx = Depends(require("view_dashboard"))):
+    """تنزيل الصفوف المتخطّاة أثناء الاستيراد كـ CSV ليصلحها المستخدم ويرفعها.
+
+    أول الملفّ سبب لكل صفّ، ثم أعمدة الصفّ كما كانت. يتولّد مرة
+    وحدة بعد الـ apply، فلا يرهق قاعدة البيانات.
+    """
+    import csv
+    import io
+
+    from fastapi.responses import StreamingResponse
+
+    run = await db.fetchrow(
+        "select stats, (select file_name from uploads where id=upload_id) fn from cleaning_runs where id=$1 and org_id=$2",
+        run_id, ctx.org_id)
+    if not run:
+        raise HTTPException(404)
+    items = ((run["stats"] or {}).get("skipped") or {}).get("items") or []
+    cols = []
+    seen = set()
+    for it in items:
+        for k in (it.get("data") or {}).keys():
+            if k not in seen:
+                seen.add(k)
+                cols.append(k)
+    buf = io.StringIO()
+    # BOM لإكسل العربي.
+    buf.write("﻿")
+    w = csv.writer(buf)
+    w.writerow(["row_index", "reason_ar", "reason_en", *cols])
+    for it in items:
+        data = it.get("data") or {}
+        w.writerow([it.get("row", ""), it.get("reason_ar", ""), it.get("reason", ""),
+                    *(data.get(c, "") for c in cols)])
+    buf.seek(0)
+    fn = (run["fn"] or "import").rsplit(".", 1)[0]
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
+                             headers={"content-disposition": f'attachment; filename="skipped_{fn}.csv"'})
 
 
 @router.get("/rules")
