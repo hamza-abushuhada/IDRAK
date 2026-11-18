@@ -43,8 +43,18 @@ function Customers() {
     {
       key: "recency_days", label: tx("Last visit", "آخر زيارة"), align: "end", render: (c) => (
         <span className="whitespace-nowrap">
-          <span className={`num ${c.recency_days > 30 ? "text-terra" : "text-ink"}`}>{c.recency_days === 0 ? tx("today", "اليوم") : tx(`${c.recency_days}d ago`, `قبل ${c.recency_days} يوم`)}</span>
-          <span className="num block text-[11px] text-ink-3">{date(c.last_visit, locale)}</span>
+          {c.recency_days == null ? (
+            // زبون مسجَّل وما اشترى ولا مرة — مافيش "آخر زيارة" أصلاً.
+            // قبل كان يطبع "قبل null يوم" لأن null === 0 غير صحيح.
+            <span className="text-ink-3">{tx("never bought", "ما اشترى بعد")}</span>
+          ) : (
+            <>
+              <span className={`num ${c.recency_days > 30 ? "text-terra" : "text-ink"}`}>
+                {c.recency_days === 0 ? tx("today", "اليوم") : tx(`${c.recency_days}d ago`, `قبل ${c.recency_days} يوم`)}
+              </span>
+              <span className="num block text-[11px] text-ink-3">{date(c.last_visit, locale)}</span>
+            </>
+          )}
         </span>
       ),
     },

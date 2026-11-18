@@ -567,6 +567,46 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             if product["barcode"] and _valid_barcode(product["barcode"]):
                 barcodes[re.sub(r"\D", "", product["barcode"])].append(product)
         custs = {cu["phone"]: cu["id"] for cu in await c.fetch("select id, phone from customers where org_id=$1 and phone is not null", ctx.org_id)}
+        cats: dict[str, str] = {match_key(r["name"]): r["id"] for r in await c.fetch("select id,name from categories where org_id=$1", ctx.org_id)}
+        employees_created: list[str] = []
+        categories_created: list[str] = []
+
+        async def employee_id(name: str):
+            """يرجّع معرّف الموظف، وينشئه لو ظهر بالملف وما كان مسجَّل.
+
+            الكاشير اسمه جوّا كل فاتورة. لو ما كان مسجَّلاً، كان يضيع
+            واسمه ما بينربط بأي مبيعات — صفحة الموظفين تبقى فاضية
+            رغم إن الملف فيه أسماء. ننشئه بوظيفة "cashier" وبدون راتب،
+            وصفحة الموظفين بتخلّي المالك يكمّل بياناته بعدين.
+            """
+            if not name:
+                return None
+            k = match_key(name)
+            if k in emps:
+                return emps[k]
+            eid = await c.fetchval(
+                "insert into employees(org_id,full_name,full_name_ar,job_title) values($1,$2,$2,'cashier') returning id",
+                ctx.org_id, name)
+            emps[k] = eid
+            employees_created.append(name)
+            return eid
+
+        async def category_id(name: str):
+            """يرجّع معرّف الفئة، وينشئها لو ما كانت موجودة.
+
+            عمود "الفئة" بملفات المبيعات كان يتجاهَل، فصفحة الأصناف
+            تظهر كل شي بلا تصنيف و"أعلى فئة" بالداشبورد يبقى فاضي.
+            """
+            if not name:
+                return None
+            k = match_key(name)
+            if k in cats:
+                return cats[k]
+            cid = await c.fetchval(
+                "insert into categories(org_id,name,name_ar) values($1,$2,$2) returning id", ctx.org_id, name)
+            cats[k] = cid
+            categories_created.append(name)
+            return cid
 
         async def branch_id(name: str):
             """يرجّع معرّف الفرع، وينشئه لو ظهر بالملف وما كان معرَّف.
@@ -592,7 +632,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             matches = names.get(match_key(name), [])
             return matches[0] if len(matches) == 1 else None
 
-        async def product_id(name, price, cost=None, barcode=None, sku=None):
+        async def product_id(name, price, cost=None, barcode=None, sku=None, category=None):
             k = match_key(name)
             existing = find_product(name, barcode)
             if existing:
@@ -601,6 +641,15 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                        select $1,$2,$3,'import' where not exists
                                        (select 1 from product_aliases where org_id=$1 and product_id=$2 and alias=$3)""",
                                     ctx.org_id, existing["id"], name)
+                # الصنف موجود بس بلا فئة: نربطه بالفئة من الملف (صفحة
+                # الأصناف كانت تظهر كل شي "--" تحت الفئة).
+                if category:
+                    cid = await category_id(category)
+                    if cid:
+                        await c.execute(
+                            "update products set category_id=$2 where id=$1 and org_id=$3 and category_id is null",
+                            existing["id"], cid, ctx.org_id)
+                        existing["category_id"] = cid
                 return existing["id"], existing["cost"]
             if cost is None:
                 raise SkippedRow(
@@ -614,9 +663,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     f"تكلفة غير صالحة لصنف جديد: {name}",
                 )
             stored_barcode = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
-            pid = await c.fetchval("""insert into products(org_id,name,sku,barcode,price,cost,upload_id) values($1,$2,$3,$4,$5,$6,$7) returning id""",
-                                   ctx.org_id, name, sku, stored_barcode, price or 0, cost, upload_id)
-            product = {"id": pid, "name": name, "cost": cost, "price": price, "barcode": stored_barcode, "sku": sku}
+            cid = await category_id(category) if category else None
+            pid = await c.fetchval("""insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id) values($1,$2,$3,$4,$5,$6,$7,$8) returning id""",
+                                   ctx.org_id, name, sku, stored_barcode, price or 0, cost, upload_id, cid)
+            product = {"id": pid, "name": name, "cost": cost, "price": price, "barcode": stored_barcode, "sku": sku, "category_id": cid}
             names[k].append(product)
             if stored_barcode:
                 barcodes[stored_barcode].append(product)
@@ -650,7 +700,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     sold = sold.replace(tzinfo=dt.timezone(dt.timedelta(hours=3)))
                     branch_name = g(r0, "branch")
                     br = await branch_id(branch_name) if branch_name else None
-                    emp = emps.get(match_key(g(r0, "cashier") or ""))
+                    emp = await employee_id(g(r0, "cashier"))
                     cust = custs.get(g(r0, "phone") or "")
                     items, subtotal = [], Decimal("0")
                     for _ri, r in lines:
@@ -669,7 +719,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         if price is None:
                             raise SkippedRow(f"Invoice {inv}: invalid unit price {p}",
                                              f"الفاتورة {inv}: سعر وحدة غير صالح {p}", ri0)
-                        pid, cost = await product_id(name, price, cost, g(r, "barcode"), g(r, "sku"))
+                        pid, cost = await product_id(name, price, cost, g(r, "barcode"), g(r, "sku"), g(r, "category"))
                         lt = (Decimal(str(q)) * price).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
                         subtotal += lt
                         items.append((pid, Decimal(str(q)), price, cost, lt))
@@ -766,7 +816,8 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
                         run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
-                                 "skipped": skipped_blob, "branches_created": branches_created})
+                                 "skipped": skipped_blob, "branches_created": branches_created,
+                                 "employees_created": employees_created, "categories_created": categories_created})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
@@ -775,7 +826,9 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
     return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned,
             "skipped": {"count": len(skipped), "sample": skipped[:20]},
-            "branches_created": branches_created}
+            "branches_created": branches_created,
+            "employees_created": employees_created,
+            "categories_created": categories_created}
 
 
 @router.post("/runs/{run_id}/undo")
