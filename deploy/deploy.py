@@ -90,7 +90,7 @@ def main():
     set_env(API_PROJECT, {
         "DATABASE_URL": db_url,
         "SUPABASE_URL": E["SUPABASE_URL"], "SUPABASE_ANON_KEY": E["SUPABASE_ANON_KEY"], "SUPABASE_SERVICE_ROLE_KEY": E["SUPABASE_SERVICE_ROLE_KEY"],
-        "SUPABASE_JWT_SECRET": E.get("SUPABASE_JWT_SECRET", ""), "SUPABASE_PROJECT_REF": ref,
+        "SUPABASE_PROJECT_REF": ref,
         "GEMINI_API_KEY": E.get("GEMINI_API_KEY", ""), "RESEND_API_KEY": E.get("RESEND_API_KEY", ""),
         "RESEND_FROM_EMAIL": E.get("RESEND_FROM_EMAIL", "onboarding@resend.dev"), "RESEND_TEST_RECIPIENT": E.get("RESEND_TEST_RECIPIENT", ""),
         "WEB_URL": web_url, "CORS_ORIGINS": f"{web_url},http://localhost:3000",

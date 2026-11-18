@@ -440,7 +440,7 @@ async def rfm(org_id: str) -> dict:
     for r in rows:
         last = r["last_visit"]
         rd = (end - dt.date.fromisoformat(last)).days if last else None
-        acquired_days = (end - r["created_at"].date()).days if r["created_at"] else None
+        acquired_days = (end - dt.date.fromisoformat(str(r["created_at"])[:10])).days if r["created_at"] else None
         if last is None:
             # لم يشترِ قطّ. ثلاث حالات: مُسجَّل حديثاً (بانتظار)، أو جديد
             # متأخّر، أو لم نحسبه. created_at دائماً موجود (NOT NULL).
