@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import clsx from "clsx";
 import { AlertTriangle, Brain, Check, CheckCheck, Download, Loader2, Printer, RotateCcw, Undo2, X } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
-import { api, API_URL } from "@/lib/api";
+import { api, downloadFile } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
 import { useQueryClient } from "@tanstack/react-query";
 import { AskIdrak, ErrorBox, PageHeader, Section } from "@/components/app/kit";
@@ -20,7 +20,8 @@ type Cluster = { column: string; field: string; canonical: string; variants: { v
 type Run = {
   id: string; upload_id: string; file_name: string; status: string; entity: string; score_before: Score; score_after: Score; columns: string[];
   stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number>; learned_rules?: number;
-    skipped?: { count: number; items: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } };
+    skipped?: { count: number; items: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] };
+    branches_created?: string[] };
   rule_status: Record<string, { proposed: number; approved: number; rejected: number }>; totals: { proposed: number; approved: number; rejected: number };
   imported_at: string | null; reverted_at: string | null;
 };
@@ -138,6 +139,24 @@ export default function RunPage() {
           </div>
         )}
         {(() => {
+          const created = result?.branches_created ?? r?.stats.branches_created ?? [];
+          if (!created.length) return null;
+          return (
+            <div className="border-t border-sky/30 bg-sky/10 px-6 py-3 text-[13.5px] text-ink">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <Check size={15} className="text-sky" />
+                <span className="font-medium">{tx(`${created.length} new branches were added to your workspace`, `انضاف ${created.length} فرع جديد لمساحة شغلك`)}</span>
+                <span className="text-ink-3">{tx("They were not defined before; each sale in the file created one. Rename them in Settings → Branches if the spelling isn't how you'd write it.",
+                                                    "ما كانوا معرَّفين قبل، وكل فرع ظهر بالملف انفتح تلقائياً. غيّر اسمائهم من الإعدادات → الفروع إذا الإملاء مش زي ما بتحبّه.")}</span>
+                <button onClick={() => router.push(`/${locale}/app/settings/branches`)} className="ms-auto underline">{tx("Manage branches →", "إدارة الفروع ←")}</button>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {created.map((b, i) => <Badge key={i}>{b}</Badge>)}
+              </div>
+            </div>
+          );
+        })()}
+        {(() => {
           const sk = result?.skipped?.count ?? r?.stats.skipped?.count ?? 0;
           if (!sk) return null;
           const sample = result?.skipped?.sample ?? r?.stats.skipped?.items ?? [];
@@ -148,9 +167,12 @@ export default function RunPage() {
                 <span className="font-medium">{tx(`${sk} rows were skipped`, `انتخطّى ${sk} صفّ`)}</span>
                 <span className="text-ink-3">{tx("The clean rows were imported. Download the list below, fix the issues, and re-upload just the fixed rows.",
                                                 "الصفوف السليمة انستوردت. نزّل القائمة تحت، صلّح الأخطاء، وارفع بس الصفوف المصلّحة.")}</span>
-                <a href={`${API_URL}/data/runs/${id}/skipped.csv`} className="ms-auto inline-flex items-center gap-1 rounded-md border border-saffron/50 bg-sand px-3 py-1 text-saffron hover:bg-saffron/15">
+                <button onClick={async () => {
+                  try { await downloadFile(`/data/runs/${id}/skipped.csv`, `skipped_${id.slice(0, 8)}.csv`); }
+                  catch (e) { toast(tx("Couldn't download", "ما قدرنا ننزّل"), (e as Error).message, "error"); }
+                }} className="ms-auto inline-flex items-center gap-1 rounded-md border border-saffron/50 bg-sand px-3 py-1 text-saffron hover:bg-saffron/15">
                   <Download size={14} />{tx("Download skipped rows (CSV)", "نزّل الصفوف المتخطّاة (CSV)")}
-                </a>
+                </button>
               </div>
               {sample.length > 0 && (
                 <ul className="mt-2 list-disc ps-5 text-[12.5px] text-ink-2">

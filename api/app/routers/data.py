@@ -540,6 +540,8 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     upload_id = run["upload_id"]
     entity = run["entity"]
     stats = {"sales": 0, "lines": 0, "customers": 0, "products_created": 0, "products_updated": 0}
+    # الفروع اللي أنشأها الاستيراد تلقائياً (اسم الفرع ظهر بالملف وما كان موجود).
+    branches_created: list[str] = []
     # الصفوف المتخطّاة: لا نرفض الملف، نجمعها ونعرضها للمستخدم.
     skipped: list[dict] = []
 
@@ -565,6 +567,23 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             if product["barcode"] and _valid_barcode(product["barcode"]):
                 barcodes[re.sub(r"\D", "", product["barcode"])].append(product)
         custs = {cu["phone"]: cu["id"] for cu in await c.fetch("select id, phone from customers where org_id=$1 and phone is not null", ctx.org_id)}
+
+        async def branch_id(name: str):
+            """يرجّع معرّف الفرع، وينشئه لو ظهر بالملف وما كان معرَّف.
+
+            الرفض بـ "فرع غير معروف" كان يوقف الملف كامل. محل جديد ما
+            عنده فروع مسجّلة بعد، أو فرع جديد فتح للتوّ — كلاهما وارد.
+            الإنشاء هنا يحفظ الاسم كما ورد في الملف، والتنظيف يوحّد
+            الأشكال المختلفة قبل الوصول لهنا.
+            """
+            k = match_key(name)
+            if k in branches:
+                return branches[k]
+            bid = await c.fetchval(
+                "insert into branches(org_id,name) values($1,$2) returning id", ctx.org_id, name)
+            branches[k] = bid
+            branches_created.append(name)
+            return bid
 
         def find_product(name, barcode=None):
             if barcode and _valid_barcode(barcode):
@@ -630,10 +649,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                          f"الفاتورة {inv} فيها تاريخ غير صالح: {ds}", ri0) from exc
                     sold = sold.replace(tzinfo=dt.timezone(dt.timedelta(hours=3)))
                     branch_name = g(r0, "branch")
-                    br = branches.get(match_key(branch_name or ""))
-                    if branch_name and br is None:
-                        raise SkippedRow(f"Unknown branch: {branch_name}",
-                                         f"فرع غير معروف: {branch_name}", ri0)
+                    br = await branch_id(branch_name) if branch_name else None
                     emp = emps.get(match_key(g(r0, "cashier") or ""))
                     cust = custs.get(g(r0, "phone") or "")
                     items, subtotal = [], Decimal("0")
@@ -750,7 +766,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
                         run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
-                                 "skipped": skipped_blob})
+                                 "skipped": skipped_blob, "branches_created": branches_created})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
@@ -758,7 +774,8 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     await db.execute("insert into notifications(org_id,kind,title,link) values($1,'cleaning',$2,$3)", ctx.org_id,
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
     return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned,
-            "skipped": {"count": len(skipped), "sample": skipped[:20]}}
+            "skipped": {"count": len(skipped), "sample": skipped[:20]},
+            "branches_created": branches_created}
 
 
 @router.post("/runs/{run_id}/undo")

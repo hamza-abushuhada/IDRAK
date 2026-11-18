@@ -69,6 +69,29 @@ export async function streamApi(path: string, body: unknown, onEvent: (e: Record
   }
 }
 
+export async function downloadFile(path: string, fallbackName = "download"): Promise<void> {
+  // نزّل عبر fetch مع التوكن، لأن <a href> لا يرسل Authorization.
+  const res = await fetch(`${API_URL}${path}`, { headers: await headers(undefined, true) })
+    .catch(() => { throw new ApiError(0, "network"); });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    throw new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  const cd = res.headers.get("content-disposition") || "";
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+  const name = m ? decodeURIComponent(m[1].trim()) : fallbackName;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
 export async function publicApi<T = unknown>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
   const isForm = init.body instanceof FormData;
   const res = await fetch(`${API_URL}${path}`, {
