@@ -2,13 +2,15 @@
 import { useRouter } from "@/lib/router";
 import { useRef, useState } from "react";
 import clsx from "clsx";
-import { FileSpreadsheet, Link2, Trash2, Brain, Download, Files } from "lucide-react";
+import { AlertTriangle, FileSpreadsheet, Link2, Trash2, Brain, Download, Files } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiMutation, useApiQuery } from "@/lib/useApi";
+import { useQueryClient } from "@tanstack/react-query";
 import { date, timeAgo } from "@/lib/format";
 import { AskIdrak, PageHeader, Section, Table } from "@/components/app/kit";
-import { Badge, Button, Input, Spinner } from "@/components/ui";
+import { Badge, Button, Card, Input, Spinner } from "@/components/ui";
+import { Drawer } from "@/components/workspace/common";
 import { toast } from "@/components/ui/toast";
 import { useSession } from "@/components/app/session";
 
@@ -33,6 +35,28 @@ export default function DataHub() {
   const uploads = useApiQuery<Upload[]>("/data/uploads");
   const rules = useApiQuery<Rule[]>("/data/rules");
   const delRule = useApiMutation<string>("DELETE", (id) => `/data/rules/${id}`, { invalidate: ["/data/rules"] });
+  const [pending, setPending] = useState<Upload | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [typed, setTyped] = useState("");
+  const qc = useQueryClient();
+
+  async function confirmDelete() {
+    if (!pending) return;
+    setDeleting(true);
+    try {
+      const res = await api<{ deleted: { sales: number; customers: number; products: number } }>(
+        `/data/uploads/${pending.id}`, { method: "DELETE" });
+      const d = res.deleted;
+      toast(tx("Deleted for good", "انحذف نهائياً"),
+        tx(`${d.sales} sales, ${d.customers} customers, ${d.products} products removed`,
+           `انحذفت ${d.sales} عملية بيع، ${d.customers} زبون، ${d.products} صنف`), "info");
+      setPending(null);
+      setTyped("");
+      qc.invalidateQueries();
+    } catch (e) {
+      toast(tx("Couldn't delete", "ما قدرنا نحذف"), (e as Error).message, "error");
+    } finally { setDeleting(false); }
+  }
 
   async function uploadFile(f: File) {
     if (!can("manager")) return toast(tx("Managers and owners can upload data", "رفع البيانات للمدير والمالك بس"), undefined, "info");
@@ -147,6 +171,12 @@ export default function DataHub() {
             { key: "status", label: tx("Status", "الحالة"), render: (u) => { const [l, t] = status(u.status); return <Badge tone={t}>{l}</Badge>; } },
             { key: "by", label: tx("By", "بواسطة"), render: (u) => <span className="text-ink-3">{u.uploaded_by_name || "—"}</span> },
             { key: "when", label: tx("When", "متى"), render: (u) => <span className="text-ink-3" title={date(u.created_at, locale)}>{timeAgo(u.created_at, locale)}</span> },
+            { key: "del", label: "", align: "end", render: (u) => can("manager") ? (
+              <button onClick={(e) => { e.stopPropagation(); setPending(u); setTyped(""); }}
+                className="rounded p-1.5 text-ink-3 transition hover:bg-danger/10 hover:text-danger"
+                title={tx("Delete permanently", "حذف نهائي")}>
+                <Trash2 size={15} />
+              </button>) : null },
           ]} />
       </Section>
 
@@ -161,6 +191,52 @@ export default function DataHub() {
             { key: "x", label: "", align: "end", render: (r) => can("manager") ? <button onClick={(e) => { e.stopPropagation(); delRule.mutate(r.id); }} className="text-ink-3 hover:text-danger"><Trash2 size={15} /></button> : null },
           ]} />
       </Section>
+
+      <Drawer open={!!pending} onOpenChange={(o) => { if (!o) { setPending(null); setTyped(""); } }}
+        title={tx("Delete permanently?", "حذف نهائي؟")}
+        subtitle={tx("This cannot be undone. Read what will be removed.", "هذا الحذف ما بينتراجع عنه. اقرأ شو رح ينحذف.")}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => { setPending(null); setTyped(""); }} disabled={deleting}>{tx("Cancel", "إلغاء")}</Button>
+            <Button variant="danger" loading={deleting} disabled={typed !== "DELETE"} onClick={confirmDelete}>
+              <Trash2 size={15} />{tx("Delete forever", "احذف نهائياً")}
+            </Button>
+          </div>
+        }>
+        {pending && (
+          <div className="space-y-4 text-[13.5px] text-ink-2">
+            <Card className="border-danger/30 bg-saffron-soft/50 p-4">
+              <p className="flex items-start gap-2 font-medium text-danger"><AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                {tx("Everything below is erased right away and cannot be recovered.", "كل شي تحت بينحذف فوراً وما بينرجع.")}</p>
+            </Card>
+            <div>
+              <p className="mb-1 text-[12px] font-medium uppercase tracking-wide text-ink-3">{tx("File", "الملف")}</p>
+              <p className="font-mono text-[13px] text-ink break-all">{pending.file_name}</p>
+              <p className="mt-1 text-[12.5px] text-ink-3">
+                <span className="num">{pending.row_count.toLocaleString()}</span> {tx("rows", "صف")} · {({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد") } as Record<string, string>)[pending.entity] || pending.entity}
+              </p>
+            </div>
+            <div>
+              <p className="mb-1.5 text-[12px] font-medium uppercase tracking-wide text-ink-3">{tx("What will be removed", "شو رح ينحذف")}</p>
+              <ul className="list-disc space-y-1 ps-5 text-[13px]">
+                <li>{tx("The uploaded file and its preview rows", "الملف المرفوع وصفوفه في المعاينة")}</li>
+                <li>{tx("Every row this file imported (sales / customers / products created by it)", "كل صفّ استورده هذا الملف (مبيعات / زبائن / أصناف أنشأها)")}</li>
+                <li>{tx("The cleaning run, its changes and the skipped-rows log", "سجلّ التنظيف وتعديلاته وقائمة الصفوف المتخطّاة")}</li>
+              </ul>
+              <p className="mt-2 rounded-md bg-sand px-3 py-2 text-[12.5px] text-ink-3">
+                {tx("Kept: cleaning rules already learned, and products/sales that came from other files.",
+                    "بينحفظ: قواعد التنظيف المتعلّمة، والأصناف/المبيعات اللي إجت من ملفات تانية.")}
+              </p>
+            </div>
+            <div>
+              <p className="mb-1.5 text-[12.5px] text-ink-2">
+                {tx("To confirm, type", "للتأكيد، اكتب")} <code className="rounded bg-ink px-1.5 py-0.5 font-mono text-[12px] text-paper">DELETE</code>
+              </p>
+              <Input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="DELETE" dir="ltr" />
+            </div>
+          </div>
+        )}
+      </Drawer>
     </div>
   );
 }

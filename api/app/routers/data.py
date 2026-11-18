@@ -479,6 +479,14 @@ def _num(v, default=None):
         return default
 
 
+def _rowcount(res) -> int:
+    """صيغة asyncpg لنتيجة execute: "DELETE 12" → 12."""
+    try:
+        return int(str(res).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 def _money(v) -> Decimal | None:
     try:
         return Decimal(str(v)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
@@ -769,6 +777,75 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.undone", "upload", str(run["upload_id"]))
     return {"ok": True, "sales_removed": int(n1.split()[-1]), "customers_removed": int(n2.split()[-1])}
+
+
+@router.delete("/uploads/{upload_id}")
+async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"))):
+    """حذف نهائي لملفّ مرفوع وكل ما نتج عنه.
+
+    تحذير: هذا الحذف لا يُتراجع عنه. يحذف:
+    - الـ upload وسجلّ التنظيف وكل التغييرات
+    - المبيعات/الزبائن/الأصناف الناتجة عنه (upload_id = هذا الملف)
+    - الأصناف التي أنشأها هذا الملف ولم تُستخدم في أي مبيعات أخرى
+
+    لا يحذف القواعد المتعلَّمة في cleaning_rules — تلك تخصّ المؤسسة
+    كلّها، ولا صلة لها بملفّ واحد.
+    """
+    exists = await db.fetchrow("select id, batch_id from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
+    if not exists:
+        raise HTTPException(404, "Upload not found")
+    batch_id = exists["batch_id"]
+    async with db.transaction() as c:
+        sales_n = await c.execute("delete from sales where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
+        cust_n = await c.execute("delete from customers where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
+        # الأصناف اللي أنشأها هذا الملف فقط، وبدون استخدام في مبيعات أخرى.
+        prod_n = await c.execute(
+            """delete from products p
+               where p.upload_id=$1 and p.org_id=$2
+                 and not exists (select 1 from sale_items si where si.product_id=p.id)
+                 and not exists (select 1 from purchase_items pi where pi.product_id=p.id)""",
+            upload_id, ctx.org_id)
+        # upload_data / cleaning_runs / cleaning_changes تُحذف بـ cascade.
+        await c.execute("delete from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
+        # لو الدفعة صارت فاضية، نشيلها كمان حتى ما تظل صفوف يتيمة.
+        if batch_id:
+            left = await c.fetchval("select count(*) from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)
+            if not left:
+                await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
+    db.cache_clear()
+    await db.audit(ctx.org_id, ctx.user.id, "upload.deleted", "upload", upload_id,
+                   {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n)})
+    return {"ok": True, "deleted": {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n)}}
+
+
+@router.delete("/batches/{batch_id}")
+async def delete_batch(batch_id: str, ctx: Ctx = Depends(require("upload_data"))):
+    """حذف نهائي لدفعة كاملة وكل ملفاتها وكل ما نتج عنها."""
+    b = await db.fetchrow("select id from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
+    if not b:
+        raise HTTPException(404, "Batch not found")
+    ids = [str(r["id"]) for r in await db.fetch("select id from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)]
+    totals = {"sales": 0, "customers": 0, "products": 0, "files": 0}
+    for uid in ids:
+        async with db.transaction() as c:
+            s = await c.execute("delete from sales where upload_id=$1 and org_id=$2", uid, ctx.org_id)
+            cu = await c.execute("delete from customers where upload_id=$1 and org_id=$2", uid, ctx.org_id)
+            p = await c.execute(
+                """delete from products p
+                   where p.upload_id=$1 and p.org_id=$2
+                     and not exists (select 1 from sale_items si where si.product_id=p.id)
+                     and not exists (select 1 from purchase_items pi where pi.product_id=p.id)""",
+                uid, ctx.org_id)
+            await c.execute("delete from uploads where id=$1 and org_id=$2", uid, ctx.org_id)
+        totals["sales"] += _rowcount(s)
+        totals["customers"] += _rowcount(cu)
+        totals["products"] += _rowcount(p)
+        totals["files"] += 1
+    async with db.transaction() as c:
+        await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
+    db.cache_clear()
+    await db.audit(ctx.org_id, ctx.user.id, "batch.deleted", "batch", batch_id, totals)
+    return {"ok": True, "deleted": totals}
 
 
 @router.get("/runs/{run_id}/skipped.csv")
