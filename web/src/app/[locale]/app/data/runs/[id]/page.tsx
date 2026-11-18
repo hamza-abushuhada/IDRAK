@@ -40,7 +40,7 @@ export default function RunPage() {
   const run = useApiQuery<Run>(`/data/runs/${id}`);
   const [tab, setTab] = useState<"fixes" | "merges" | "grid" | "review">("fixes");
   const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } } | null>(null);
+  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] }; branches_created?: string[] } | null>(null);
   const r = run.data;
   const refresh = () => qc.invalidateQueries({ predicate: (q) => String(q.queryKey[1] || "").includes(`/data/runs/${id}`) });
 
