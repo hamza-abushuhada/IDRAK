@@ -3,9 +3,9 @@ import { useParams } from "next/navigation";
 import { useRouter } from "@/lib/router";
 import { useMemo, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Brain, Check, CheckCheck, Loader2, Printer, RotateCcw, Undo2, X } from "lucide-react";
+import { AlertTriangle, Brain, Check, CheckCheck, Download, Loader2, Printer, RotateCcw, Undo2, X } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
-import { api } from "@/lib/api";
+import { api, API_URL } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
 import { useQueryClient } from "@tanstack/react-query";
 import { AskIdrak, ErrorBox, PageHeader, Section } from "@/components/app/kit";
@@ -19,7 +19,8 @@ type Issue = { key: string; kind: "fix" | "flag"; title_en: string; title_ar: st
 type Cluster = { column: string; field: string; canonical: string; variants: { value: string; count: number }[]; rows: number };
 type Run = {
   id: string; upload_id: string; file_name: string; status: string; entity: string; score_before: Score; score_after: Score; columns: string[];
-  stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number>; learned_rules?: number };
+  stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number>; learned_rules?: number;
+    skipped?: { count: number; items: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } };
   rule_status: Record<string, { proposed: number; approved: number; rejected: number }>; totals: { proposed: number; approved: number; rejected: number };
   imported_at: string | null; reverted_at: string | null;
 };
@@ -38,7 +39,7 @@ export default function RunPage() {
   const run = useApiQuery<Run>(`/data/runs/${id}`);
   const [tab, setTab] = useState<"fixes" | "merges" | "grid" | "review">("fixes");
   const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number } | null>(null);
+  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } } | null>(null);
   const r = run.data;
   const refresh = () => qc.invalidateQueries({ predicate: (q) => String(q.queryKey[1] || "").includes(`/data/runs/${id}`) });
 
@@ -58,11 +59,15 @@ export default function RunPage() {
   async function apply() {
     setBusy("apply");
     try {
-      const res = await api<{ imported: Record<string, number>; learned_rules: number }>(`/data/runs/${id}/apply`, { method: "POST" });
+      const res = await api<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } }>(`/data/runs/${id}/apply`, { method: "POST" });
       setResult(res);
       refresh();
       qc.invalidateQueries();
-      toast(tx("Clean data imported", "تم استيراد البيانات النظيفة"), tx(`Idrak learned ${res.learned_rules} new rules`, `إدراك تعلّم ${res.learned_rules} قاعدة جديدة`));
+      const sk = res.skipped?.count || 0;
+      toast(tx("Clean data imported", "تم استيراد البيانات النظيفة"),
+        sk ? tx(`${sk} rows were skipped — download the list to fix and re-upload`,
+                `انتخطّى ${sk} صفّ — نزّل القائمة وصلحها وارفعها مرة ثانية`)
+           : tx(`Idrak learned ${res.learned_rules} new rules`, `إدراك تعلّم ${res.learned_rules} قاعدة جديدة`));
     } catch (e) {
       toast(tx("Import failed", "فشل الاستيراد"), (e as Error).message, "error");
     } finally { setBusy(null); }
@@ -132,6 +137,32 @@ export default function RunPage() {
             <button onClick={() => router.push(`/${locale}/app`)} className="ms-auto underline">{tx("See it on the dashboard →", "شوفها على لوحة التحكم ←")}</button>
           </div>
         )}
+        {(() => {
+          const sk = result?.skipped?.count ?? r?.stats.skipped?.count ?? 0;
+          if (!sk) return null;
+          const sample = result?.skipped?.sample ?? r?.stats.skipped?.items ?? [];
+          return (
+            <div className="border-t border-saffron/40 bg-saffron/10 px-6 py-3 text-[13.5px] text-ink">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <AlertTriangle size={15} className="text-saffron" />
+                <span className="font-medium">{tx(`${sk} rows were skipped`, `انتخطّى ${sk} صفّ`)}</span>
+                <span className="text-ink-3">{tx("The clean rows were imported. Download the list below, fix the issues, and re-upload just the fixed rows.",
+                                                "الصفوف السليمة انستوردت. نزّل القائمة تحت، صلّح الأخطاء، وارفع بس الصفوف المصلّحة.")}</span>
+                <a href={`${API_URL}/data/runs/${id}/skipped.csv`} className="ms-auto inline-flex items-center gap-1 rounded-md border border-saffron/50 bg-sand px-3 py-1 text-saffron hover:bg-saffron/15">
+                  <Download size={14} />{tx("Download skipped rows (CSV)", "نزّل الصفوف المتخطّاة (CSV)")}
+                </a>
+              </div>
+              {sample.length > 0 && (
+                <ul className="mt-2 list-disc ps-5 text-[12.5px] text-ink-2">
+                  {sample.slice(0, 5).map((it, i) => (
+                    <li key={i}><span className="num">#{(it.row ?? 0) + 1}</span> — {tx(it.reason, it.reason_ar)}</li>
+                  ))}
+                  {sk > 5 && <li className="text-ink-3">{tx(`… and ${sk - 5} more`, `… و${sk - 5} غيرها`)}</li>}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
       </Card>
 
       <div className="no-print mt-6 flex flex-wrap items-center justify-between gap-3">
