@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 import unicodedata
 
 ARABIC_INDIC = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -25,6 +26,7 @@ def to_western_digits(s: str) -> str:
     return s.translate(ARABIC_INDIC).replace("٫", ".").replace("٬", ",")
 
 
+@lru_cache(maxsize=200_000)
 def clean_text(v) -> str:
     if v is None:
         return ""
@@ -37,16 +39,19 @@ def clean_text(v) -> str:
     return s
 
 
+@lru_cache(maxsize=200_000)
 def is_null(v) -> bool:
     return clean_text(v).lower() in NULL_TOKENS
 
 
+@lru_cache(maxsize=200_000)
 def fold_arabic(s: str) -> str:
     s = re.sub("[إأآٱ]", "ا", s)
     s = s.replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي").replace("ء", "")
     return s
 
 
+@lru_cache(maxsize=200_000)
 def match_key(v) -> str:
     s = fold_arabic(clean_text(v).lower())
     s = re.sub(r"(\d)\s*(ml|l|g|kg|مل|لتر|غم|كغ)", r"\1 \2", s)
@@ -69,6 +74,7 @@ def nums(v) -> list[str]:
     return sorted(re.findall(r"\d+(?:\.\d+)?", clean_text(v)))
 
 
+@lru_cache(maxsize=200_000)
 def skeleton(v) -> str:
     s = fold_arabic(clean_text(v).lower())
     s = re.sub(r"\b(al|el)[-\s]", "", s)

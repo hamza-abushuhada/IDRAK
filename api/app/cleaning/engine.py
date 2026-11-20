@@ -424,7 +424,9 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                     tv = Decimal(t)
                     if abs(tv - exp) > Decimal("0.011") and abs(tv - exp) > Decimal("0.02") * max(abs(exp), Decimal("0.001")):
                         flags.append(Flag(ri, headers[ti], t, "total_mismatch"))
-                except ValueError:
+                except (ValueError, InvalidOperation):
+                    # InvalidOperation تُرفع من Decimal() لما تكون القيمة
+                    # نصاً غير رقمي — وما كانت ملتقطة، فكانت تُسقط الملف كله.
                     flags.append(Flag(ri, headers[ti], t, "invalid_number"))
 
     for (ri, ci), rules in cell_rules.items():
@@ -506,10 +508,20 @@ def _valid(kind: str, v: str, cleaned: bool) -> bool:
     return v == clean_text(v)
 
 
+# مؤشر الصحة رقم إحصائي، مش محاسبة. حسابه على كل صفّ كان ياخد 92% من
+# وقت التنظيف (26 ثانية من 28 لملف 5 آلاف صف)، فيستحيل نخدم ملف 100 ألف.
+# عيّنة موزّعة على الملف كلّه تعطي نفس الرقم تقريباً بتكلفة ثابتة.
+SCORE_SAMPLE = 4000
+
+
 def score(headers, rows, fields, entity, today, cleaned: bool) -> dict:
     n = len(rows)
     if n == 0:
         return {"score": 0, "dimensions": {k: 0 for k in WEIGHTS}}
+    if n > SCORE_SAMPLE:
+        step = max(1, n // SCORE_SAMPLE)
+        rows = rows[::step]
+        n = len(rows)
     req = set(REQUIRED.get(entity, []))
     col_idx = {h: i for i, h in enumerate(headers)}
     filled = total_req = 0

@@ -353,8 +353,8 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     headers = u["columns"]
     # التنظيف يعمل داخل الطلب. الملفات الكبيرة جداً تتجاوز مهلة الاستضافة
     # فيقطع الاتصال برسالة "network" بلا تفسير. نرفض بلطف ونطلب التقسيم.
-    if len(d["raw_rows"]) > 25000:
-        raise HTTPException(413, f"This file has {len(d['raw_rows']):,} rows. Idrak cleans up to 25,000 rows per file — "
+    if len(d["raw_rows"]) > 120000:
+        raise HTTPException(413, f"This file has {len(d['raw_rows']):,} rows. Idrak cleans up to 120,000 rows per file — "
                                  f"split it by month (e.g. one file per month) and upload them separately.")
     mapping = {h: (u["mapping"].get(h) or {}).get("field") for h in headers}
     ctxk = await load_context(ctx.org_id)
