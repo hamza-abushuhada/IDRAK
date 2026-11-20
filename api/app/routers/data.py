@@ -623,6 +623,9 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     has_cost_col = "cost" in fmap
     # الفروع اللي أنشأها الاستيراد تلقائياً (اسم الفرع ظهر بالملف وما كان موجود).
     branches_created: list[str] = []
+    # المرتجعات (كمية سالبة) لا تُستورد: قيمتها سالبة وتقلب الإيراد والربح،
+    # والمحل يحتاج يشوفها بحسابه على حدة. نعدّها ونبلّغ عنها بصراحة.
+    returns = {"lines": 0, "invoices": 0, "value": Decimal("0")}
     # الصفوف المتخطّاة: لا نرفض الملف، نجمعها ونعرضها للمستخدم.
     skipped: list[dict] = []
 
@@ -653,7 +656,9 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         employees_created: list[str] = []
         categories_created: list[str] = []
 
-        async def employee_id(name: str):
+        emp_branch_done: set[str] = set()
+
+        async def employee_id(name: str, branch: str | None = None):
             """يرجّع معرّف الموظف، وينشئه لو ظهر بالملف وما كان مسجَّل.
 
             الكاشير اسمه جوّا كل فاتورة. لو ما كان مسجَّلاً، كان يضيع
@@ -665,11 +670,20 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 return None
             k = match_key(name)
             if k in emps:
-                return emps[k]
+                eid = emps[k]
+                # موظف موجود بلا فرع: نربطه بأول فرع يظهر معه.
+                if branch and eid not in emp_branch_done:
+                    emp_branch_done.add(eid)
+                    await c.execute(
+                        "update employees set branch_id=$2 where id=$1 and branch_id is null",
+                        eid, branch)
+                return eid
             eid = await c.fetchval(
-                "insert into employees(org_id,full_name,full_name_ar,job_title) values($1,$2,$2,'cashier') returning id",
-                ctx.org_id, name)
+                "insert into employees(org_id,branch_id,full_name,full_name_ar,job_title)"
+                " values($1,$2,$3,$3,'cashier') returning id",
+                ctx.org_id, branch, name)
             emps[k] = eid
+            emp_branch_done.add(eid)
             employees_created.append(name)
             return eid
 
@@ -818,9 +832,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                             pass
                     branch_name = g(r0, "branch")
                     br = await branch_id(branch_name) if branch_name else None
-                    emp = await employee_id(g(r0, "cashier"))
+                    emp = await employee_id(g(r0, "cashier"), br)
                     cust = custs.get(g(r0, "phone") or "")
                     items, subtotal = [], Decimal("0")
+                    disc_lines, has_pct, saw_negative = Decimal("0"), False, False
                     for _ri, r in lines:
                         name = g(r, "product")
                         q = _num(g(r, "quantity"))
@@ -828,6 +843,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         t = _num(g(r, "total"))
                         cost = _num(g(r, "cost"))
                         if not name or q is None or q <= 0 or q > 200:
+                            if q is not None and q < 0:
+                                saw_negative = True
+                                returns["lines"] += 1
+                                returns["value"] += abs(_money(g(r, "total")) or Decimal("0"))
                             continue
                         if p is None and t is not None:
                             p = t / q
@@ -839,9 +858,25 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                              f"الفاتورة {inv}: سعر وحدة غير صالح {p}", ri0)
                         pid, cost = await product_id(name, price, cost, g(r, "barcode"), g(r, "sku"), g(r, "category"))
                         lt = (Decimal(str(q)) * price).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                        # الخصم بالملفات قد يكون نسبة ("30%") أو مبلغاً (0.500).
+                        d_raw = g(r, "discount")
+                        d_amt = Decimal("0")
+                        if d_raw:
+                            if "%" in d_raw:
+                                has_pct = True
+                                try:
+                                    pct = Decimal(re.sub(r"[^0-9.\-]", "", d_raw) or "0")
+                                    d_amt = (lt * pct / Decimal("100")).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                                except (InvalidOperation, ValueError):
+                                    d_amt = Decimal("0")
+                            else:
+                                d_amt = _money(d_raw) or Decimal("0")
+                        disc_lines += d_amt
                         subtotal += lt
-                        items.append((pid, Decimal(str(q)), price, cost, lt))
+                        items.append((pid, Decimal(str(q)), price, cost, lt, d_amt))
                     if not items:
+                        if saw_negative:
+                            returns["invoices"] += 1
                         continue
                     sid = uuid.uuid4()
                     pm = g(r0, "payment_method")
@@ -849,7 +884,8 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         raise SkippedRow(f"Invoice {inv}: unknown or missing payment method ({pm or 'empty'})",
                                          f"الفاتورة {inv}: طريقة دفع غير معروفة أو مفقودة ({pm or 'فارغ'})", ri0)
                     contract = run["batch_contract"] or {}
-                    discount = _money(g(r0, "discount") or 0) or Decimal("0")
+                    # لو الملف يحمل نسباً، مجموع خصومات البنود هو خصم الفاتورة.
+                    discount = disc_lines if has_pct else (_money(g(r0, "discount") or 0) or Decimal("0"))
                     tax_mode = contract.get("tax_mode", "none")
                     rate = Decimal(str(contract.get("tax_rate") or 0)) / Decimal("100")
                     if tax_mode == "from_file":
@@ -871,7 +907,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         net_subtotal, tax, total = subtotal, Decimal("0"), subtotal - discount
                     sale_recs.append((sid, uuid.UUID(str(ctx.org_id)), br, emp, cust, inv, sold, net_subtotal, discount, tax,
                                       total, pm, "completed", upload_id))
-                    item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), sid, pid, q, p, cost, Decimal("0"), lt) for pid, q, p, cost, lt in items)
+                    item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), sid, pid, q, p, cost, d_amt, lt) for pid, q, p, cost, lt, d_amt in items)
                     stats["sales"] += 1
                     stats["lines"] += len(items)
                 except SkippedRow as exc:
@@ -935,7 +971,9 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
                         run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
                                  "skipped": skipped_blob, "branches_created": branches_created,
-                                 "employees_created": employees_created, "categories_created": categories_created})
+                                 "employees_created": employees_created, "categories_created": categories_created,
+                                 "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
+                                             "value": float(returns["value"])}})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
@@ -946,7 +984,9 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             "skipped": {"count": len(skipped), "sample": skipped[:20]},
             "branches_created": branches_created,
             "employees_created": employees_created,
-            "categories_created": categories_created}
+            "categories_created": categories_created,
+            "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
+                        "value": float(returns["value"])}}
 
 
 @router.post("/runs/{run_id}/undo")

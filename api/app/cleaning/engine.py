@@ -275,6 +275,8 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                 if ri in blank:
                     continue
                 if v is None:
+                    if rule == "percent":
+                        continue
                     if rule == "invalid_number":
                         flags.append(Flag(ri, h, vals[ri], "invalid_number"))
                     elif rule == "null_token":

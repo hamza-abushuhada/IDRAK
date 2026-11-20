@@ -51,6 +51,10 @@ def parse_number(v):
             rule = rule or "decimal_comma"
     elif "," in s2:
         s2 = s2.replace(",", "")
+    # "30%" خصم بنسبة، مش رقم معطوب. نتركه كما هو ليتفسّر وقت الاستيراد،
+    # فما عاد يُعلَّم "رقم غير مفهوم" وتُحذف فاتورته.
+    if s2.endswith("%"):
+        return None, "percent"
     if not NUM_RE.match(s2):
         return None, "invalid_number"
     val = float(s2) * (-1 if neg else 1)

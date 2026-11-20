@@ -21,7 +21,8 @@ type Run = {
   id: string; upload_id: string; file_name: string; status: string; entity: string; score_before: Score; score_after: Score; columns: string[];
   stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number>; learned_rules?: number;
     skipped?: { count: number; items: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] };
-    branches_created?: string[] };
+    branches_created?: string[];
+    returns?: { lines: number; invoices: number; value: number } };
   rule_status: Record<string, { proposed: number; approved: number; rejected: number }>; totals: { proposed: number; approved: number; rejected: number };
   imported_at: string | null; reverted_at: string | null;
 };
@@ -40,7 +41,7 @@ export default function RunPage() {
   const run = useApiQuery<Run>(`/data/runs/${id}`);
   const [tab, setTab] = useState<"fixes" | "merges" | "grid" | "review">("fixes");
   const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] }; branches_created?: string[] } | null>(null);
+  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] }; branches_created?: string[]; returns?: { lines: number; invoices: number; value: number } } | null>(null);
   const r = run.data;
   const refresh = () => qc.invalidateQueries({ predicate: (q) => String(q.queryKey[1] || "").includes(`/data/runs/${id}`) });
 
@@ -138,6 +139,27 @@ export default function RunPage() {
             <button onClick={() => router.push(`/${locale}/app`)} className="ms-auto underline">{tx("See it on the dashboard →", "شوفها على لوحة التحكم ←")}</button>
           </div>
         )}
+        {(() => {
+          const ret = result?.returns ?? r?.stats.returns;
+          if (!ret || !ret.invoices) return null;
+          return (
+            <div className="border-t border-saffron/40 bg-saffron/10 px-6 py-3 text-[13.5px] text-ink">
+              <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+                <AlertTriangle size={15} className="mt-0.5 text-saffron" />
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {tx(`${ret.invoices} return invoices were not imported (${ret.value.toFixed(0)} JD)`,
+                        `${ret.invoices} فاتورة مرتجع ما انستوردت (${ret.value.toFixed(0)} د.أ)`)}
+                  </p>
+                  <p className="mt-0.5 text-ink-3">
+                    {tx("Their quantity is negative and would flip revenue and profit. Everything else was imported normally — but because returns are outside the numbers, sales and profit read slightly higher than reality.",
+                        "كمياتها سالبة وبتقلب الإيراد والربح، فتركناهم برّا. باقي الملف انستورد عادي — بس لأن المرتجعات مش محسوبة، المبيعات والربح بيطلعوا أعلى من الواقع شوي.")}
+                  </p>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
         {(() => {
           const created = result?.branches_created ?? r?.stats.branches_created ?? [];
           if (!created.length) return null;
