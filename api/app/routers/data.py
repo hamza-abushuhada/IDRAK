@@ -1,4 +1,5 @@
 import asyncio
+from functools import lru_cache
 import datetime as dt
 import re
 import uuid
@@ -523,6 +524,7 @@ def _materialize(headers, raw, changes):
     return [r for i, r in enumerate(rows) if i not in removed]
 
 
+@lru_cache(maxsize=200_000)
 def _num(v, default=None):
     try:
         return float(v)
@@ -538,7 +540,9 @@ def _rowcount(res) -> int:
         return 0
 
 
+@lru_cache(maxsize=200_000)
 def _money(v) -> Decimal | None:
+    # Decimal(str(v)) من أغلى العمليات بالحلقة، والقيم نفسها تتكرر بكل سطر.
     try:
         return Decimal(str(v)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, TypeError, ValueError):
@@ -636,7 +640,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     async with db.transaction() as c:
         branches = {match_key(b["name"]): b["id"] for b in await c.fetch("select id,name from branches where org_id=$1", ctx.org_id)}
         emps = {match_key(e["full_name"]): e["id"] for e in await c.fetch("select id, full_name from employees where org_id=$1", ctx.org_id)}
-        product_rows = [dict(p) for p in await c.fetch("select id,name,cost,price,barcode,sku from products where org_id=$1", ctx.org_id)]
+        product_rows = [dict(p) for p in await c.fetch("select id,name,cost,price,barcode,sku,category_id from products where org_id=$1", ctx.org_id)]
         names: dict[str, list[dict]] = defaultdict(list)
         barcodes: dict[str, list[dict]] = defaultdict(list)
         for product in product_rows:
@@ -645,6 +649,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 barcodes[re.sub(r"\D", "", product["barcode"])].append(product)
         custs = {cu["phone"]: cu["id"] for cu in await c.fetch("select id, phone from customers where org_id=$1 and phone is not null", ctx.org_id)}
         cats: dict[str, str] = {match_key(r["name"]): r["id"] for r in await c.fetch("select id,name from categories where org_id=$1", ctx.org_id)}
+        alias_done: set[tuple[str, str]] = set()
         employees_created: list[str] = []
         categories_created: list[str] = []
 
@@ -713,21 +718,22 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             k = match_key(name)
             existing = find_product(name, barcode)
             if existing:
-                if k != match_key(existing["name"]):
+                # هذان التعديلان يُنفَّذان مرة واحدة لكل صنف، مش لكل سطر.
+                pid_e = existing["id"]
+                if k != match_key(existing["name"]) and (pid_e, name) not in alias_done:
+                    alias_done.add((pid_e, name))
                     await c.execute("""insert into product_aliases(org_id,product_id,alias,source)
                                        select $1,$2,$3,'import' where not exists
                                        (select 1 from product_aliases where org_id=$1 and product_id=$2 and alias=$3)""",
-                                    ctx.org_id, existing["id"], name)
-                # الصنف موجود بس بلا فئة: نربطه بالفئة من الملف (صفحة
-                # الأصناف كانت تظهر كل شي "--" تحت الفئة).
-                if category:
+                                    ctx.org_id, pid_e, name)
+                if category and not existing.get("category_id"):
                     cid = await category_id(category)
                     if cid:
                         await c.execute(
                             "update products set category_id=$2 where id=$1 and org_id=$3 and category_id is null",
-                            existing["id"], cid, ctx.org_id)
+                            pid_e, cid, ctx.org_id)
                         existing["category_id"] = cid
-                return existing["id"], existing["cost"]
+                return pid_e, existing["cost"]
             if cost is None:
                 if not has_cost_col:
                     # الملف كله بلا تكلفة — ننشئ الصنف ونكمل، والتنبيه
