@@ -956,6 +956,38 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     return {"ok": True, "sales_removed": int(n1.split()[-1]), "customers_removed": int(n2.split()[-1])}
 
 
+@router.post("/clear-all")
+async def clear_all_data(ctx: Ctx = Depends(require("upload_data"))):
+    """يمسح كل بيانات التشغيل للمؤسسة ويرجّعها لصفحة بيضاء.
+
+    بعد تجارب رفع كثيرة تبقى أصناف وفروع وموظفون من ملفات قديمة، والأرقام
+    ما عادت مفهومة. هذا يمسح المبيعات والزبائن والأصناف والموظفين والفروع
+    والفئات والملفات — ويترك الحساب والفريق والإعدادات.
+    """
+    async with db.transaction() as c:
+        n_sales = await c.execute("delete from sales where org_id=$1", ctx.org_id)
+        n_cust = await c.execute("delete from customers where org_id=$1", ctx.org_id)
+        n_prod = await c.execute("delete from products where org_id=$1", ctx.org_id)
+        n_emp = await c.execute("delete from employees where org_id=$1", ctx.org_id)
+        n_goals = await c.execute("delete from goals where org_id=$1", ctx.org_id)
+        # الفروع: نُبقي فرعاً واحداً حتى تظل الواجهة صالحة للاستخدام،
+        # ونعيد تسميته للاسم الافتراضي.
+        keep = await c.fetchval("select id from branches where org_id=$1 order by created_at limit 1", ctx.org_id)
+        if keep:
+            await c.execute("delete from branches where org_id=$1 and id<>$2", ctx.org_id, keep)
+            await c.execute("update branches set name='Main branch', name_ar='الفرع الرئيسي' where id=$1", keep)
+        n_cat = await c.execute("delete from categories where org_id=$1", ctx.org_id)
+        n_up = await c.execute("delete from uploads where org_id=$1", ctx.org_id)
+        await c.execute("delete from import_batches where org_id=$1", ctx.org_id)
+        await c.execute("delete from notifications where org_id=$1", ctx.org_id)
+    db.cache_clear()
+    counts = {"sales": _rowcount(n_sales), "customers": _rowcount(n_cust), "products": _rowcount(n_prod),
+              "employees": _rowcount(n_emp), "goals": _rowcount(n_goals), "categories": _rowcount(n_cat),
+              "uploads": _rowcount(n_up)}
+    await db.audit(ctx.org_id, ctx.user.id, "org.cleared", "organization", ctx.org_id, counts)
+    return {"ok": True, "deleted": counts}
+
+
 @router.delete("/uploads/{upload_id}")
 async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"))):
     """حذف نهائي لملفّ مرفوع وكل ما نتج عنه.
@@ -968,7 +1000,7 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
     لا يحذف القواعد المتعلَّمة في cleaning_rules — تلك تخصّ المؤسسة
     كلّها، ولا صلة لها بملفّ واحد.
     """
-    exists = await db.fetchrow("select id, batch_id from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
+    exists = await db.fetchrow("select id, batch_id, columns, mapping from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
     if not exists:
         raise HTTPException(404, "Upload not found")
     batch_id = exists["batch_id"]
@@ -981,6 +1013,25 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
     made_branches = [b for b in (run_stats.get("branches_created") or []) if b]
     made_emps = [e for e in (run_stats.get("employees_created") or []) if e]
     made_cats = [c for c in (run_stats.get("categories_created") or []) if c]
+    # ملفات قديمة (رُفعت قبل ما نسجّل هذه الأسماء): نستخرجها من بيانات
+    # الملف نفسه. بدونها تبقى فروع وموظفون معلّقون للأبد بعد الحذف.
+    if not (made_branches and made_emps):
+        raw = await db.fetchval("select raw_rows from upload_data where upload_id=$1", upload_id)
+        cols = exists["columns"] or []
+        m = exists["mapping"] or {}
+        idx = {field: i for i, h in enumerate(cols) if (field := (m.get(h) or {}).get("field"))}
+        def _names(field):
+            i = idx.get(field)
+            if i is None or not raw:
+                return []
+            return sorted({str(r[i]).strip() for r in raw
+                           if i < len(r) and r[i] not in (None, "")})
+        if not made_branches:
+            made_branches = _names("branch")
+        if not made_emps:
+            made_emps = _names("cashier")
+        if not made_cats:
+            made_cats = _names("category")
     async with db.transaction() as c:
         sales_n = await c.execute("delete from sales where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
         cust_n = await c.execute("delete from customers where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)

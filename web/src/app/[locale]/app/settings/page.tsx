@@ -48,6 +48,7 @@ export default function SettingsPage() {
           <div className="space-y-5">
             <LanguageCard />
             <BranchesCard org={org} owner={owner} />
+            <DangerCard owner={owner} />
           </div>
         </div>
       )}
@@ -151,6 +152,30 @@ function LanguageCard() {
     <Section title={tx("Your language", "لغتك")} subtitle={tx("Just for you — teammates choose their own.", "إلك إنت بس — كل واحد بالفريق بيختار لغته.")}>
       <Label>{tx("Interface language", "لغة الواجهة")}</Label>
       <Tabs value={locale} onChange={(v) => !busy && change(v)} items={[{ value: "ar", label: "العربية" }, { value: "en", label: "English" }]} />
+    </Section>
+  );
+}
+
+function DangerCard({ owner }: { owner: boolean }) {
+  const tx = useTx();
+  const { refresh } = useSession();
+  const clear = useApiMutation<Record<string, never>>("POST", "/data/clear-all", {
+    invalidate: ["/org", "/data/uploads", "/ws", "/insights"],
+    errorTitle: tx("Couldn't clear the data", "ما قدرنا نمسح الداتا"),
+  });
+  if (!owner) return null;
+  return (
+    <Section title={tx("Start over", "ابدأ من جديد")}
+      subtitle={tx("Wipes the sales, customers, products, staff and branches brought in by your files, and keeps your account, team and settings. Use it after testing with sample files.",
+                  "يمسح المبيعات والزبائن والأصناف والموظفين والفروع اللي إجت من ملفاتك، وبينحفظ حسابك وفريقك وإعداداتك. استخدمه بعد ما تجرّب بملفات تجريبية.")}>
+      <Button variant="danger" size="sm" loading={clear.isPending}
+        onClick={() => {
+          if (!window.confirm(tx("Delete ALL your sales, customers, products, staff and branches? This cannot be undone.",
+                                 "بدك تحذف كل المبيعات والزبائن والأصناف والموظفين والفروع؟ ما بينتراجع عنه."))) return;
+          clear.mutate({}, { onSuccess: () => { toast(tx("Workspace cleared", "انمسحت الداتا")); refresh(); } });
+        }}>
+        {tx("Clear all data", "امسح كل الداتا")}
+      </Button>
     </Section>
   );
 }
