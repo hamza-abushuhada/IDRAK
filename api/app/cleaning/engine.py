@@ -144,31 +144,42 @@ class Matcher:
 
 
 def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[str, float]]:
+    """يجمع الأشكال المتقاربة من نفس القيمة تحت اسم واحد.
+
+    كان يمرّ على كل مجموعة لكل قيمة: O(n²) مع حساب تشابه نصّي لكل زوج.
+    على ملف فيه آلاف القيم الفريدة (أصناف/زبائن) هذا بياخد دقائق ويقطع
+    الطلب. صار: مطابقة تامة عبر قاموس، ثم بحث ضبابي داخل مجموعة الأرقام
+    فقط وبعد فحص أول حرف — نفس النتيجة بجزء بسيط من الوقت.
+    """
     groups: list[dict] = []
     loose = kind in ("branch", "city", "area", "company")
+    # مجموعات مفهرسة: بالأرقام (شرط أساسي أصلاً بالمطابقة) ثم بالحرف الأول.
+    by_nums: dict[str, dict[str, list[dict]]] = {}
+    exact: dict[str, dict] = {}
     for raw, cnt in values.most_common():
         disp = clean_text(raw)
         if not disp:
             continue
-        mk, sk, nm, ar = match_key(disp), skeleton(disp), nums(disp), is_arabic(disp)
-        target = None
-        for g in groups:
-            if nm != g["nums"]:
-                continue
-            if mk == g["mk"]:
-                target, conf = g, 1.0
-                break
-            if len(mk) > 4 and fuzz.ratio(mk, g["mk"]) >= (90 if loose else 93):
-                target, conf = g, 0.9
-                break
-            if sk and sk == g["sk"] and ar != g["ar"] and len(sk.replace(" ", "")) >= (3 if loose else 4):
-                target, conf = g, 0.8
-                break
-            if loose and min(len(mk), len(g["mk"])) >= 4 and fuzz.partial_token_set_ratio(mk, g["mk"]) >= 95:
-                target, conf = g, 0.75
-                break
+        mk, sk, nm, ar = match_key(disp), skeleton(disp), tuple(nums(disp)), is_arabic(disp)
+        target, conf = exact.get(mk), 1.0
         if target is None:
-            groups.append({"mk": mk, "sk": sk, "nums": nm, "ar": ar, "canon": disp, "members": [(raw, 1.0, cnt)]})
+            buckets = by_nums.setdefault(nm, {})
+            first = mk[:1]
+            for g in buckets.get(first, ()) + buckets.get("", ()):
+                if len(mk) > 4 and fuzz.ratio(mk, g["mk"]) >= (90 if loose else 93):
+                    target, conf = g, 0.9
+                    break
+                if sk and sk == g["sk"] and ar != g["ar"] and len(sk.replace(" ", "")) >= (3 if loose else 4):
+                    target, conf = g, 0.8
+                    break
+                if loose and min(len(mk), len(g["mk"])) >= 4 and fuzz.partial_token_set_ratio(mk, g["mk"]) >= 95:
+                    target, conf = g, 0.75
+                    break
+        if target is None:
+            g = {"mk": mk, "sk": sk, "nums": nm, "ar": ar, "canon": disp, "members": [(raw, 1.0, cnt)]}
+            groups.append(g)
+            by_nums.setdefault(nm, {}).setdefault(mk[:1], []).append(g)
+            exact[mk] = g
         else:
             target["members"].append((raw, conf, cnt))
     out = {}
