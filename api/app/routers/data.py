@@ -761,6 +761,16 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         raise SkippedRow(f"Invoice {inv} has an invalid date: {ds}",
                                          f"الفاتورة {inv} فيها تاريخ غير صالح: {ds}", ri0) from exc
                     sold = sold.replace(tzinfo=dt.timezone(dt.timedelta(hours=3)))
+                    # عمود وقت منفصل (Night/Afternoon/14:30) يُدمج مع التاريخ،
+                    # وإلا ضاع وقت البيع وما بنقدر نحكي عن أوقات الذروة.
+                    tm = g(r0, "sale_time")
+                    if tm and ":" in tm:
+                        try:
+                            hh, mm = (int(x) for x in tm.split(":")[:2])
+                            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                                sold = sold.replace(hour=hh, minute=mm)
+                        except (ValueError, TypeError):
+                            pass
                     branch_name = g(r0, "branch")
                     br = await branch_id(branch_name) if branch_name else None
                     emp = await employee_id(g(r0, "cashier"))

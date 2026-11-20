@@ -5,19 +5,21 @@ from .arabic import match_key
 FIELDS: dict[str, tuple[str, list[str]]] = {
     "invoice_number": ("id", ["invoice", "invoice no", "invoice number", "inv", "inv no", "receipt", "receipt no", "bill no", "رقم الفاتورة", "فاتورة", "الفاتورة", "رقم الايصال", "transaction id"]),
     "date": ("date", ["date", "day", "sold at", "datetime", "sale date", "transaction date", "تاريخ", "التاريخ", "تاريخ البيع", "time", "الوقت"]),
-    "branch": ("branch", ["branch", "store", "shop", "location", "outlet", "فرع", "الفرع", "المحل", "الموقع"]),
-    "cashier": ("person", ["cashier", "employee", "staff", "user", "sales person", "كاشير", "الكاشير", "الموظف", "موظف", "البائع"]),
+    # عمود وقت منفصل عن التاريخ (Night / Afternoon / 14:30). إدراك يخزّن
+    # البيع بتاريخ ووقت مع بعض، فنقرأ العمودين وندمجهم وقت الاستيراد.
+    "sale_time": ("time", ["time of sale", "sale time", "time of day", "hour", "shift", "وقت البيع", "وقت العمليه", "الساعة"]),    "branch": ("branch", ["branch", "store", "shop", "location", "outlet", "فرع", "الفرع", "المحل", "الموقع"]),
+    "cashier": ("person", ["cashier", "employee", "staff", "user", "sales person", "received by", "served by", "كاشير", "الكاشير", "الموظف", "موظف", "البائع"]),
     "product": ("product", ["product", "item", "item name", "product name", "description", "sku name", "اسم الصنف", "الصنف", "صنف", "المنتج", "اسم المنتج", "البند", "المادة"]),
     "barcode": ("barcode", ["barcode", "ean", "upc", "باركود", "الباركود"]),
     "sku": ("id", ["sku", "item code", "code", "رمز الصنف", "كود الصنف", "كود"]),
-    "category": ("category", ["category", "department", "group", "الفئة", "التصنيف", "القسم"]),
+    "category": ("category", ["category", "department", "group", "item type", "product type", "item category", "الفئة", "التصنيف", "القسم"]),
     "quantity": ("quantity", ["qty", "quantity", "units", "count", "pcs", "الكمية", "كمية", "العدد", "عدد"]),
-    "unit_price": ("money", ["price", "unit price", "selling price", "sale price", "سعر الوحدة", "السعر", "سعر", "سعر البيع", "سعر الحبة"]),
+    "unit_price": ("money", ["price", "unit price", "selling price", "sale price", "item price", "unit amount", "سعر الوحدة", "السعر", "سعر", "سعر البيع", "سعر الحبة"]),
     "cost": ("money", ["cost", "unit cost", "purchase price", "التكلفة", "سعر الشراء", "الكلفة"]),
-    "total": ("money", ["total", "amount", "line total", "net", "net amount", "value", "الإجمالي", "الاجمالي", "المجموع", "المبلغ", "القيمة"]),
+    "total": ("money", ["total", "amount", "line total", "net", "net amount", "value", "transaction amount", "grand total", "الإجمالي", "الاجمالي", "المجموع", "المبلغ", "القيمة"]),
     "discount": ("money", ["discount", "disc", "خصم", "الخصم"]),
     "tax": ("money", ["tax", "vat", "sales tax", "ضريبة", "الضريبة", "ضريبة المبيعات"]),
-    "payment_method": ("payment", ["payment", "payment method", "pay method", "tender", "method", "طريقة الدفع", "الدفع", "وسيلة الدفع"]),
+    "payment_method": ("payment", ["payment", "payment method", "pay method", "tender", "method", "transaction type", "payment type", "طريقة الدفع", "الدفع", "وسيلة الدفع"]),
     "customer_name": ("person", ["customer", "customer name", "client", "name", "full name", "الزبون", "اسم الزبون", "العميل", "اسم العميل", "الاسم"]),
     "phone": ("phone", ["phone", "mobile", "tel", "telephone", "whatsapp", "customer phone", "phone number", "موبايل", "رقم الموبايل", "هاتف", "الهاتف", "رقم الهاتف", "جوال", "واتس"]),
     "email": ("email", ["email", "e-mail", "mail", "البريد", "البريد الالكتروني", "ايميل", "الايميل", "الإيميل"]),
@@ -35,7 +37,7 @@ FIELDS: dict[str, tuple[str, list[str]]] = {
 }
 
 LABELS = {
-    "invoice_number": ("Invoice number", "رقم الفاتورة"), "date": ("Date", "التاريخ"), "branch": ("Branch", "الفرع"),
+    "invoice_number": ("Invoice number", "رقم الفاتورة"), "date": ("Date", "التاريخ"), "sale_time": ("Time of sale", "وقت البيع"), "branch": ("Branch", "الفرع"),
     "cashier": ("Cashier", "الكاشير"), "product": ("Product", "الصنف"), "barcode": ("Barcode", "الباركود"), "sku": ("SKU", "رمز الصنف"),
     "category": ("Category", "الفئة"), "quantity": ("Quantity", "الكمية"), "unit_price": ("Unit price", "سعر الوحدة"),
     "cost": ("Cost", "التكلفة"), "total": ("Total", "الإجمالي"), "discount": ("Discount", "الخصم"), "tax": ("Tax", "الضريبة"),
@@ -65,7 +67,10 @@ _SYN_KEYS = [k for k, _ in _SYN]
 
 
 def guess_field(header: str) -> tuple[str | None, float]:
-    k = match_key(header)
+    # أسماء الأعمدة بالأنظمة كثير فيها شرطات سفلية (item_name، received_by).
+    # match_key بتخلّي "_" لأنها حرف كلمة، فما كانت تطابق المرادفات
+    # المكتوبة بمسافة. نبدّلها قبل التطبيع.
+    k = match_key(str(header or "").replace("_", " "))
     if not k:
         return None, 0.0
     for key, f in _SYN:

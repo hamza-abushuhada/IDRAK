@@ -149,6 +149,61 @@ def fmt_date(d: dt.datetime) -> str:
     return d.strftime("%Y-%m-%d %H:%M") if (d.hour or d.minute) else d.strftime("%Y-%m-%d")
 
 
+# أوقات اليوم المكتوبة كلمات. المفاتيح مطبّعة بـ match_key حتى تطابق
+# ما نقرأه من الملف ("مساء" تُطبَّع فتصير "مسا").
+_TIME_WORDS = {match_key(k): v for k, v in {
+    "night": (20, 0), "late night": (23, 0), "evening": (18, 0), "afternoon": (14, 0),
+    "noon": (12, 0), "midday": (12, 0), "morning": (9, 0), "early morning": (7, 0),
+    "midnight": (0, 0), "dawn": (5, 0),
+    "ليل": (20, 0), "ليلا": (20, 0), "مساء": (18, 0), "مساءا": (18, 0), "عصر": (15, 0), "عصرا": (15, 0),
+    "ظهر": (12, 0), "ظهرا": (12, 0), "صباح": (9, 0), "صباحا": (9, 0), "فجر": (5, 0), "فجرا": (5, 0),
+}.items()}
+
+
+def parse_time(v):
+    """يحوّل وقت البيع إلى "HH:MM".
+
+    الملفات كثير بتحطّ كلمة بدل ساعة ("Night"، "Afternoon")، أو ساعة
+    بصيغة ٢ مساءً. نرجّع دائماً HH:MM عشان الدمج مع التاريخ يكون سهل.
+    """
+    if v is None:
+        return None, None
+    s = clean_text(v)
+    if not s:
+        return None, "null_token"
+    if is_null(s):
+        return None, "null_token"
+    k = match_key(s).strip()
+    if k in _TIME_WORDS:
+        h, m = _TIME_WORDS[k]
+        return f"{h:02d}:{m:02d}", "time_word"
+
+    low = s.lower()
+    # 14:30 / 9:05 / 14.30 /
+    m = re.fullmatch(r"(\d{1,2})\s*[:.،]\s*(\d{2})", low)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{h:02d}:{mi:02d}", ("time_format" if s != f"{h:02d}:{mi:02d}" else None)
+        return None, "invalid_time"
+    # 2 pm / 2:30 PM
+    m = re.fullmatch(r"(\d{1,2})(?:\s*[:.]\s*(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)", low)
+    if m:
+        h = int(m.group(1)) % 12
+        mi = int(m.group(2) or 0)
+        if m.group(3).startswith("p"):
+            h += 12
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{h:02d}:{mi:02d}", "time_format"
+        return None, "invalid_time"
+    # رقم صافي = الساعة
+    if re.fullmatch(r"\d{1,2}", low):
+        h = int(low)
+        if 0 <= h <= 23:
+            return f"{h:02d}:00", "time_format"
+    return None, "invalid_time"
+
+
 def column_dayfirst(values) -> bool:
     first_gt, second_gt = 0, 0
     for v in values:

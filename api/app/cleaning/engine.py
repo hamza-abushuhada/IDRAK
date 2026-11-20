@@ -47,6 +47,7 @@ FLAGS = {
     "negative_qty": ("Negative quantities (returns?)", "كميات سالبة (مرتجعات؟)"),
     "qty_outlier": ("Suspicious quantities (e.g. 999)", "كميات مشبوهة (مثل 999)"),
     "future_date": ("Dates in the future", "تواريخ بالمستقبل"),
+    "invalid_time": ("Times that can't be read", "أوقات غير مفهومة"),
     "missing_required": ("Missing required values", "قيم أساسية ناقصة"),
     "unknown_product": ("Products not in your catalog", "أصناف غير موجودة بقائمتك"),
     "missing_total": ("Line total is missing", "إجمالي السطر ناقص"),
@@ -233,6 +234,19 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                 if d.date() > today + dt.timedelta(days=1):
                     flags.append(Flag(ri, h, vals[ri], "future_date"))
                 record(ri, ci, P.fmt_date(d), rule)
+
+        elif kind == "time":
+            for ri in range(n):
+                if ri in blank:
+                    continue
+                t, rule = P.parse_time(vals[ri])
+                if t is None:
+                    if rule == "invalid_time":
+                        flags.append(Flag(ri, h, vals[ri], "invalid_time"))
+                    elif rule == "null_token":
+                        record(ri, ci, "", "null_token")
+                    continue
+                record(ri, ci, t, rule or "time_format")
 
         elif kind in ("money", "quantity"):
             parsed = []
