@@ -521,16 +521,38 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     changes = await db.fetch("select * from cleaning_changes where run_id=$1", run_id)
     headers = run["columns"]
     rows = _materialize(headers, d["raw_rows"], changes)
-    # Financial imports must be reconciled before they can affect reports.
-    # Warnings remain reviewable; these conditions are unsafe to guess.
+    # _materialize تحذف الصفوف المعلَّمة بالحذف، فترقيم rows ما يطابق
+    # ترقيم الملف الأصلي. نحتاج الخريطة لأن أعلام المشاكل المالية
+    # مسجّلة بترقيم الملف الأصلي.
+    _removed_idx = {c["row_index"] for c in changes
+                    if c["column_name"] == "*" and c["status"] != "rejected"}
+    row_map = [i for i in range(len(d["raw_rows"])) if i not in _removed_idx]
+    # الصفوف اللي فيها مشكلة مالية (تاريخ مستقبلي، إجمالي ناقص، إجمالي
+    # ما يطابق الكمية×السعر...) كانت توقف الملف كامل بـ 422 ولا في طريقة
+    # لإكمالها من الواجهة — الشاشة تعرض "فشل الاستيراد" وبس.
+    # الحين: الصفوف المتأثرة تُتخطّى وتظهر بقائمة الصفوف المتخطّاة مع
+    # السبب، وباقي الملف ينستورد. لو كانت كلها فيها مشاكل، النتيجة
+    # imported=0 مع القائمة كاملة — أوضح من رسالة خطأ بلا مخرج.
+    blocked_reasons: dict[int, tuple[str, str]] = {}
     if run["entity"] == "sales":
         approved_cells = {(c["row_index"], c["column_name"]) for c in changes
                           if c["status"] == "approved" and c["new_value"] not in (None, "")}
-        blocked = [f for f in (run["stats"] or {}).get("blocking_flags", [])
-                   if (f.get("row"), f.get("column")) not in approved_cells]
-        if blocked:
-            reasons = sorted({f["reason"] for f in blocked})
-            raise HTTPException(422, f"Import blocked until financial issues are resolved: {', '.join(reasons)}")
+        reason_labels = {
+            "missing_total": ("Line total is missing", "إجمالي السطر ناقص"),
+            "total_mismatch": ("Line total does not match quantity × unit price",
+                               "إجمالي السطر لا يطابق الكمية × سعر الوحدة"),
+            "invalid_date": ("Date can't be read", "تاريخ غير مفهوم"),
+            "invalid_number": ("Number can't be read", "رقم غير مفهوم"),
+            "unknown_payment": ("Unknown payment method", "طريقة دفع غير معروفة"),
+            "unknown_product": ("Product not in your catalog", "صنف غير موجود بقائمتك"),
+            "missing_required": ("A required value is missing", "قيمة أساسية ناقصة"),
+            "future_date": ("Date is in the future", "تاريخ بالمستقبل"),
+        }
+        for f in (run["stats"] or {}).get("blocking_flags", []):
+            if (f.get("row"), f.get("column")) in approved_cells:
+                continue
+            entry = reason_labels.get(f.get("reason"), (f.get("reason"), f.get("reason")))
+            blocked_reasons.setdefault(f.get("row"), entry)
     fmap = {(run["mapping"].get(h) or {}).get("field"): i for i, h in enumerate(headers) if (run["mapping"].get(h) or {}).get("field")}
 
     def g(r, f):
@@ -686,6 +708,14 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 groups[key].append((ri, r))
             for _, lines in groups.items():
                 ri0, r0 = lines[0]
+                # لو أي سطر بالفاتورة عليه علم مالي (تاريخ مستقبلي/إجمالي
+                # ناقص...) نتخطّى الفاتورة كاملة مع السبب، بدل ما توقف
+                # الملف. فاتورة نصفها مشكوك فيه ما بتنستورد نصّها.
+                hit = next((blocked_reasons[row_map[ri]] for ri, _r in lines
+                            if ri < len(row_map) and row_map[ri] in blocked_reasons), None)
+                if hit:
+                    _skip(row_map[ri0], r0, hit[0], hit[1])
+                    continue
                 try:
                     inv = g(r0, "invoice_number")
                     ds = g(r0, "date")
