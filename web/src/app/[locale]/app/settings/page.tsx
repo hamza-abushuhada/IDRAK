@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useRouter } from "@/lib/router";
-import { MapPin, Plus } from "lucide-react";
+import { Combine, MapPin, Plus } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiMutation, useApiQuery } from "@/lib/useApi";
@@ -167,6 +167,21 @@ function BranchesCard({ org, owner }: { org: OrgFull; owner: boolean }) {
     errorTitle: tx("Couldn't add the branch", "ما قدرنا نضيف الفرع"),
     onSuccess: () => { toast(tx("Branch added", "انضاف الفرع")); setAdding(false); setB({ name: "", name_ar: "", city: org.city || "Amman", area: "" }); refresh(); },
   });
+  // دمج فرع مكرّر: الفروع المكرّرة تنشأ لما يجي نفس المكان بأسماء
+  // مختلفة بالملفات ("الصويفية" و"Sweifieh")، فتنقسم مبيعاته على صفّين.
+  const [merging, setMerging] = useState<string | null>(null);
+  const [mergeInto, setMergeInto] = useState("");
+  const merge = useApiMutation<{ into: string }, { moved: { sales: number; employees: number; goals: number } }>(
+    "POST", (body) => `/org/branches/${merging}/merge`, {
+      invalidate: ["/org", "/ws/branches", "/insights/dashboard", "/ws/sales"],
+      errorTitle: tx("Couldn't merge", "ما قدرنا ندمج"),
+      onSuccess: (res) => {
+        toast(tx("Branches merged", "اندمجت الفروع"),
+          tx(`${res.moved.sales} sales moved. The old name is now remembered for future imports.`,
+             `انتقلت ${res.moved.sales} عملية بيع. الاسم القديم انحفظ لملفاتك الجاية.`), "ok");
+        setMerging(null); setMergeInto(""); refresh();
+      },
+    });
 
   return (
     <Section id="branches-list" title={tx("Branches", "الفروع")} subtitle={tx(`${org.branches.length} ${org.branches.length === 1 ? "branch" : "branches"}`, `${org.branches.length} فروع`)}
@@ -174,12 +189,46 @@ function BranchesCard({ org, owner }: { org: OrgFull; owner: boolean }) {
       bodyClass="p-0">
       <ul className="divide-y divide-line/60">
         {org.branches.map((br) => (
-          <li key={br.id} className="flex items-start justify-between gap-3 px-5 py-3">
-            <div className="min-w-0">
-              <p className="text-[14px] text-ink">{name(br.name, br.name_ar)}</p>
-              <p className="mt-0.5 flex items-center gap-1 text-[12px] text-ink-3"><MapPin size={11} />{[br.area, br.city].filter(Boolean).join("، ") || "—"}</p>
+          <li key={br.id} className="px-5 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[14px] text-ink">{name(br.name, br.name_ar)}</p>
+                <p className="mt-0.5 flex items-center gap-1 text-[12px] text-ink-3"><MapPin size={11} />{[br.area, br.city].filter(Boolean).join("، ") || "—"}</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {br.opened_at && <Badge>{tx("since", "من")} <span className="num">{date(br.opened_at, locale, { month: "short", year: "numeric" })}</span></Badge>}
+                {owner && org.branches.length > 1 && !merging && (
+                  <button onClick={() => { setMerging(br.id); setMergeInto(""); }}
+                    className="rounded p-1.5 text-ink-3 transition hover:bg-sand hover:text-ink"
+                    title={tx("Merge into another branch", "ادمج مع فرع ثاني")}>
+                    <Combine size={14} />
+                  </button>
+                )}
+              </div>
             </div>
-            {br.opened_at && <Badge>{tx("since", "من")} <span className="num">{date(br.opened_at, locale, { month: "short", year: "numeric" })}</span></Badge>}
+            {merging === br.id && (
+              <div className="mt-3 rounded-lg border border-line bg-paper-2/70 p-3">
+                <p className="text-[12.5px] text-ink-2">
+                  {tx(`Move everything in "${name(br.name, br.name_ar)}" into another branch, then delete it. Use this when the same branch appears twice — once in Arabic, once in English.`,
+                      `انقل كل شي بـ«${name(br.name, br.name_ar)}» لفرع ثاني، وبعدها ينحذف. استخدمها لما نفس الفرع يطلع مرتين — مرة عربي ومرة إنجليزي.`)}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Select value={mergeInto} onChange={(e) => setMergeInto(e.target.value)} className="h-9 min-w-[180px]">
+                    <option value="">{tx("Choose the branch to keep…", "اختار الفرع اللي بضل…")}</option>
+                    {org.branches.filter((x) => x.id !== br.id).map((x) => (
+                      <option key={x.id} value={x.id}>{name(x.name, x.name_ar)}</option>
+                    ))}
+                  </Select>
+                  <Button size="sm" variant="danger" disabled={!mergeInto} loading={merge.isPending}
+                    onClick={() => merge.mutate({ into: mergeInto })}>
+                    {tx("Merge & delete", "ادمج واحذف")}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setMerging(null); setMergeInto(""); }}>
+                    {tx("Cancel", "إلغاء")}
+                  </Button>
+                </div>
+              </div>
+            )}
           </li>
         ))}
         {!org.branches.length && <li className="px-5 py-6 text-center text-[13px] text-ink-3">{tx("No branches yet.", "لسا ما في فروع.")}</li>}

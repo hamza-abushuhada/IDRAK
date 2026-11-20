@@ -14,7 +14,10 @@ type SaleRow = {
 };
 type SaleLine = { id: string; name: string | null; name_ar: string | null; quantity: number; unit_price: number; unit_cost: number; discount: number; line_total: number };
 type SaleDetail = SaleRow & { subtotal: number; customer_phone: string | null; buyer_tax_number: string | null; lines: SaleLine[] };
-type OrgBranches = { branches: { id: string; name: string; name_ar: string | null }[] };
+type OrgBranches = {
+  branches: { id: string; name: string; name_ar: string | null }[];
+  data_range?: { first_day: string | null; last_day: string | null };
+};
 
 const LIMIT = 50;
 
@@ -85,12 +88,22 @@ function Sales() {
         </Select>
         <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
           {tx("From", "من")}
-          <Input type="date" value={start} max={end || undefined} onChange={(e) => setFilter({ start: e.target.value })} className="w-[150px]" />
+          <Input type="date" value={start} min={org.data?.data_range?.first_day || undefined}
+            max={end || org.data?.data_range?.last_day || undefined}
+            onChange={(e) => setFilter({ start: e.target.value })} className="w-[150px]" />
         </label>
         <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
           {tx("To", "لـ")}
-          <Input type="date" value={end} min={start || undefined} onChange={(e) => setFilter({ end: e.target.value })} className="w-[150px]" />
+          <Input type="date" value={end} min={start || org.data?.data_range?.first_day || undefined}
+            max={org.data?.data_range?.last_day || undefined}
+            onChange={(e) => setFilter({ end: e.target.value })} className="w-[150px]" />
         </label>
+        {org.data?.data_range?.first_day && (
+          <button type="button" onClick={() => setFilter({ start: org.data?.data_range?.first_day || "", end: org.data?.data_range?.last_day || "" })}
+            className="text-[12px] text-ink-3 underline underline-offset-4 hover:text-ink">
+            {tx("All your data", "كل الداتا")}
+          </button>
+        )}
         {hasFilters && (
           <Button variant="ghost" size="sm" onClick={() => { setSearch(""); setOffset(0); set({ branch_id: null, status: null, payment: null, start: null, end: null }); }}>
             <RotateCcw size={13} />{tx("Clear", "مسح")}

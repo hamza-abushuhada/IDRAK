@@ -14,8 +14,11 @@ router = APIRouter(tags=["insights"])
 
 
 @router.get("/insights/dashboard")
-async def dashboard(days: int = 30, branch_id: str | None = None, ctx: Ctx = Depends(require("view_dashboard"))):
-    return await I.dashboard(ctx.org_id, max(7, min(days, 365)), branch_id)
+async def dashboard(days: int = 30, branch_id: str | None = None, start: str | None = None, end: str | None = None,
+                    ctx: Ctx = Depends(require("view_dashboard"))):
+    s = dt.date.fromisoformat(start) if start else None
+    e = dt.date.fromisoformat(end) if end else None
+    return await I.dashboard(ctx.org_id, max(7, min(days, 365)), branch_id, s, e)
 
 
 @router.get("/insights/leaks")

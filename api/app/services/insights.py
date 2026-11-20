@@ -45,10 +45,19 @@ def _branch_filter(branch_id, idx):
 
 
 @db.cached(180)
-async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None) -> dict:
-    end = await data_end(org_id)
-    start = end - dt.timedelta(days=days - 1)
-    pstart, pend = start - dt.timedelta(days=days), start - dt.timedelta(days=1)
+async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
+                    start: dt.date | None = None, end: dt.date | None = None) -> dict:
+    # نطاق صريح يغلب "آخر N يوم": المالك بيسأل "شو صار بين ١ و ١٥ أيلول؟"
+    # ومو لازم نجيبره على 7/30/90. لو انعطى طرف واحد نكمّل الثاني منه.
+    if end is None:
+        end = await data_end(org_id)
+    if start is None:
+        start = end - dt.timedelta(days=days - 1)
+    if start > end:
+        start, end = end, start
+    span = (end - start).days + 1
+    days = max(1, span)
+    pstart, pend = start - dt.timedelta(days=span), start - dt.timedelta(days=1)
     bf, bargs = _branch_filter(branch_id, 4)
 
     async def kpis(a, b):

@@ -85,6 +85,11 @@ async def join_demo(user: User = Depends(current_user)):
 async def get_org(ctx: Ctx = Depends(org_ctx)):
     o = await db.fetchrow("select * from organizations where id=$1", ctx.org_id)
     o["branches"] = await db.fetch("select id,name,name_ar,city,area,lat,lng,opened_at from branches where org_id=$1 order by name", ctx.org_id)
+    # نطاق البيانات الفعلي. الفلاتر والتقارير لازم تحدّد الخيارات به، وإلا
+    # تعرض تواريخ ما فيها ولا فاتورة (أو تمنع تواريخ موجودة).
+    o["data_range"] = await db.fetchrow(
+        "select min(amman_date(sold_at)) as first_day, max(amman_date(sold_at)) as last_day"
+        " from sales where org_id=$1 and status='completed'", ctx.org_id)
     o["role"] = ctx.role
     o["usage"] = await db.fetchrow("""select (select count(*) from uploads where org_id=$1 and created_at > now() - interval '30 days') uploads_30d,
         (select coalesce(sum(row_count),0) from uploads where org_id=$1 and created_at > now() - interval '30 days') rows_30d,
@@ -121,6 +126,56 @@ async def add_branch(b: BranchIn, ctx: Ctx = Depends(require("manage_org"))):
     bid = await db.fetchval("insert into branches(org_id,name,name_ar,city,area) values($1,$2,$3,$4,$5) returning id", ctx.org_id, b.name, b.name_ar, b.city, b.area)
     await db.audit(ctx.org_id, ctx.user.id, "branch.created", "branch", str(bid), {"name": b.name})
     return {"id": str(bid)}
+
+
+class MergeBranchIn(BaseModel):
+    into: str
+
+
+@router.post("/org/branches/{branch_id}/merge")
+async def merge_branch(branch_id: str, body: MergeBranchIn, ctx: Ctx = Depends(require("manage_org"))):
+    """يدمج فرعاً في فرع آخر ويحذف الأصل.
+
+    ينشأ الفرع المكرّر لما يجي الملف باسم مختلف لنفس المكان
+    ("Sweifieh" و"الصويفية")، فتظهر مبيعاته منقسمة على صفّين بالتقارير.
+    بعد الدمج تنتقل كل المبيعات والموظفين والأهداف للفرع الهدف، ويُسجَّل
+    الاسم القديم كقاعدة تنظيف حتى ما يتكرّر الإنشاء بالملفات الجاية.
+    """
+    if branch_id == body.into:
+        raise HTTPException(422, "Cannot merge a branch into itself")
+    src = await db.fetchrow("select id, name, name_ar from branches where id=$1 and org_id=$2", branch_id, ctx.org_id)
+    dst = await db.fetchrow("select id, name, name_ar from branches where id=$1 and org_id=$2", body.into, ctx.org_id)
+    if not src or not dst:
+        raise HTTPException(404, "Branch not found")
+    async with db.transaction() as c:
+        moved_sales = await c.execute("update sales set branch_id=$2 where branch_id=$1 and org_id=$3", branch_id, body.into, ctx.org_id)
+        moved_emps = await c.execute("update employees set branch_id=$2 where branch_id=$1 and org_id=$3", branch_id, body.into, ctx.org_id)
+        # الأهداف: لا يمكن أن يوجد هدفان لنفس الفرع ونفس الشهر، فنحذف
+        # هدف الفرع المصدر إذا الهدف موجود أصلاً بالفرع الهدف.
+        await c.execute("""delete from goals g where g.org_id=$3 and g.branch_id=$1
+                             and exists (select 1 from goals t where t.org_id=$3 and t.branch_id=$2
+                                           and t.metric=g.metric and t.period_month=g.period_month)""",
+                        branch_id, body.into, ctx.org_id)
+        moved_goals = await c.execute("update goals set branch_id=$2 where branch_id=$1 and org_id=$3", branch_id, body.into, ctx.org_id)
+        await c.execute("delete from branches where id=$1 and org_id=$2", branch_id, ctx.org_id)
+        # قواعد التنظيف: كل شكل استُخدم للمصدر يتحوّل لاسم الهدف.
+        aliases = {src["name"], src["name_ar"] or ""} - {""}
+        for alias in aliases:
+            await c.execute("""insert into cleaning_rules(org_id,column_kind,match_value,replace_value,created_by)
+                               values($1,'branch',$2,$3,$4)
+                               on conflict (org_id,column_kind,match_value) do update set replace_value=excluded.replace_value""",
+                            ctx.org_id, alias, dst["name"], ctx.user.id)
+    db.cache_clear()
+    await db.audit(ctx.org_id, ctx.user.id, "branch.merged", "branch", branch_id,
+                   {"into": body.into, "sales": _n(moved_sales), "employees": _n(moved_emps), "goals": _n(moved_goals)})
+    return {"ok": True, "moved": {"sales": _n(moved_sales), "employees": _n(moved_emps), "goals": _n(moved_goals)}}
+
+
+def _n(res) -> int:
+    try:
+        return int(str(res).split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 @router.get("/team")

@@ -2,6 +2,7 @@
 import { Suspense, useMemo } from "react";
 import Link from "next/link";
 import clsx from "clsx";
+import { RotateCcw } from "lucide-react";
 import type { EChartsCoreOption } from "echarts/core";
 import { useLocale, useTx } from "@/i18n";
 import { useApiQuery } from "@/lib/useApi";
@@ -9,7 +10,7 @@ import { date, jd, num, pct } from "@/lib/format";
 import { AskIdrak, Delta, ErrorBox, LinkCell, Money, N, PageHeader, Section, Stat, StatSkeleton, Table, useName } from "@/components/app/kit";
 import Chart, { axisStyle } from "@/components/app/Chart";
 import { useSession } from "@/components/app/session";
-import { Badge, Empty, Select, Skeleton, Tabs } from "@/components/ui";
+import { Badge, Button, Empty, Input, Select, Skeleton, Tabs } from "@/components/ui";
 import { ChartSkeleton, DOW, JO_WEEK_ORDER, PageSkeleton, ShareBar, isWeekend, oneOf, paymentLabel, useOrgDetail, useParamState } from "@/components/insights/common";
 import SalesTrendChart from "@/components/insights/SalesTrendChart";
 import type { Dashboard } from "@/components/insights/types";
@@ -27,12 +28,19 @@ function DashboardScreen() {
   const { org } = useSession();
   const [daysRaw, setDays] = useParamState("days", "30");
   const days = oneOf(daysRaw, RANGES, "30");
+  const [startRaw, setStart] = useParamState("start", "");
+  const [endRaw, setEnd] = useParamState("end", "");
+  const custom = !!(startRaw && endRaw);
   const [branch, setBranch] = useParamState("branch_id", "");
   const orgQ = useOrgDetail();
-  const q = useApiQuery<Dashboard>(`/insights/dashboard?days=${days}${branch ? `&branch_id=${branch}` : ""}`);
+  const q = useApiQuery<Dashboard>(custom
+    ? `/insights/dashboard?start=${startRaw}&end=${endRaw}${branch ? `&branch_id=${branch}` : ""}`
+    : `/insights/dashboard?days=${days}${branch ? `&branch_id=${branch}` : ""}`);
   const d = q.data;
   const k = d?.kpis;
-  const vsLabel = tx(`vs previous ${days} days`, `مقارنة بالـ ${days} يوم اللي قبل`);
+  const vsLabel = custom
+    ? tx(`vs the ${(d?.range.days ?? 0)} days before`, `مقارنة بالـ ${d?.range.days ?? 0} يوم اللي قبل`)
+    : tx(`vs previous ${days} days`, `مقارنة بالـ ${days} يوم اللي قبل`);
 
   const rangeLabel = d ? `${date(d.range.start, locale, { day: "numeric", month: "short" })} – ${date(d.range.end, locale)}` : "";
   const branchName = branch ? nm(orgQ.data?.branches.find((b) => b.id === branch)?.name, orgQ.data?.branches.find((b) => b.id === branch)?.name_ar) : null;
@@ -47,11 +55,27 @@ function DashboardScreen() {
           {rangeLabel && <span className="ms-1 text-ink-3">· <span className="num">{rangeLabel}</span>{branchName && ` · ${branchName}`}</span>}
         </>}
         actions={<>
-          <div data-basira="range-picker">
-            <Tabs value={days} onChange={(v) => setDays(v)} items={[
+          <div data-basira="range-picker" className="flex flex-wrap items-center gap-2">
+            <Tabs value={days} onChange={(v) => { setStart(""); setEnd(""); setDays(v); }} items={[
               { value: "7", label: tx("7 days", "7 أيام") }, { value: "30", label: tx("30 days", "30 يوم") },
               { value: "90", label: tx("90 days", "90 يوم") }, { value: "365", label: tx("Year", "سنة") },
             ]} />
+            <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
+              {tx("From", "من")}
+              <Input type="date" value={startRaw} max={endRaw || orgQ.data?.data_range?.last_day || undefined}
+                onChange={(e) => setStart(e.target.value)} className="h-9 w-[142px]" />
+            </label>
+            <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
+              {tx("To", "لـ")}
+              <Input type="date" value={endRaw} min={startRaw || orgQ.data?.data_range?.first_day || undefined}
+                max={orgQ.data?.data_range?.last_day || undefined}
+                onChange={(e) => setEnd(e.target.value)} className="h-9 w-[142px]" />
+            </label>
+            {custom && (
+              <Button variant="ghost" size="sm" onClick={() => { setStart(""); setEnd(""); }}>
+                <RotateCcw size={13} />{tx("Clear", "مسح")}
+              </Button>
+            )}
           </div>
           <Select data-basira="branch-picker" value={branch} onChange={(e) => setBranch(e.target.value)} className="h-10 min-w-[150px]" aria-label={tx("Branch", "الفرع")}>
             <option value="">{tx("All branches", "كل الفروع")}</option>
