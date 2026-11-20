@@ -131,7 +131,6 @@ async def add_branch(b: BranchIn, ctx: Ctx = Depends(require("manage_org"))):
 class MergeBranchIn(BaseModel):
     into: str
 
-
 @router.post("/org/branches/{branch_id}/merge")
 async def merge_branch(branch_id: str, body: MergeBranchIn, ctx: Ctx = Depends(require("manage_org"))):
     """يدمج فرعاً في فرع آخر ويحذف الأصل.
@@ -176,6 +175,31 @@ def _n(res) -> int:
         return int(str(res).split()[-1])
     except (ValueError, IndexError):
         return 0
+
+
+@router.delete("/org/branches/{branch_id}")
+async def delete_branch(branch_id: str, ctx: Ctx = Depends(require("manage_org"))):
+    """يحذف فرعاً بشرط ألا يكون مرتبطاً بأي بيانات.
+
+    الفرع اللي عليه مبيعات أو موظفين أو أهداف لا يُحذف — حذفه يضيّع
+    أرقاماً أو يترك صفوفاً معلّقة. في هذه الحالة يُوجَّه المستخدم للدمج.
+    """
+    br = await db.fetchrow("select id, name from branches where id=$1 and org_id=$2", branch_id, ctx.org_id)
+    if not br:
+        raise HTTPException(404, "Branch not found")
+    used = await db.fetchrow("""select (select count(*) from sales where branch_id=$1) sales,
+                                       (select count(*) from employees where branch_id=$1) employees,
+                                       (select count(*) from goals where branch_id=$1) goals""", branch_id)
+    if used["sales"] or used["employees"] or used["goals"]:
+        raise HTTPException(409, f"This branch still has {used['sales']} sales, {used['employees']} employees "
+                                 f"and {used['goals']} goals. Merge it into another branch instead.")
+    total = await db.fetchval("select count(*) from branches where org_id=$1", ctx.org_id)
+    if total <= 1:
+        raise HTTPException(409, "This is your only branch — keep it.")
+    await db.execute("delete from branches where id=$1 and org_id=$2", branch_id, ctx.org_id)
+    db.cache_clear()
+    await db.audit(ctx.org_id, ctx.user.id, "branch.deleted", "branch", branch_id, {"name": br["name"]})
+    return {"ok": True}
 
 
 @router.get("/team")

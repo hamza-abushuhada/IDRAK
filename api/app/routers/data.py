@@ -972,6 +972,15 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
     if not exists:
         raise HTTPException(404, "Upload not found")
     batch_id = exists["batch_id"]
+    # نقرأ أسماء الفروع/الموظفين/الفئات اللي أنشأها هذا الاستيراد قبل ما
+    # ينحذف سجلّ التنظيف (بينحذف مع الملف). بدونها كانت تبقى معلّقة
+    # بصفحات الفروع والموظفين والأصناف بعد حذف الملف.
+    run_stats = await db.fetchval(
+        "select stats from cleaning_runs where upload_id=$1 and org_id=$2 order by started_at desc limit 1",
+        upload_id, ctx.org_id) or {}
+    made_branches = [b for b in (run_stats.get("branches_created") or []) if b]
+    made_emps = [e for e in (run_stats.get("employees_created") or []) if e]
+    made_cats = [c for c in (run_stats.get("categories_created") or []) if c]
     async with db.transaction() as c:
         sales_n = await c.execute("delete from sales where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
         cust_n = await c.execute("delete from customers where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
@@ -982,6 +991,26 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
                  and not exists (select 1 from sale_items si where si.product_id=p.id)
                  and not exists (select 1 from purchase_items pi where pi.product_id=p.id)""",
             upload_id, ctx.org_id)
+        # الفروع/الموظفون/الفئات التي وُلدت من هذا الملف، وبقيت بلا أي
+        # ارتباط — تنحذف معه. أي واحدة عندها مبيعات أو أهداف تبقى.
+        br_n = emp_n = cat_n = "DELETE 0"
+        if made_branches:
+            br_n = await c.execute(
+                """delete from branches b where b.org_id=$1 and b.name = any($2::text[])
+                     and not exists (select 1 from sales s where s.branch_id=b.id)
+                     and not exists (select 1 from employees e where e.branch_id=b.id)
+                     and not exists (select 1 from goals g where g.branch_id=b.id)""",
+                ctx.org_id, made_branches)
+        if made_emps:
+            emp_n = await c.execute(
+                """delete from employees e where e.org_id=$1 and e.full_name = any($2::text[])
+                     and not exists (select 1 from sales s where s.employee_id=e.id)""",
+                ctx.org_id, made_emps)
+        if made_cats:
+            cat_n = await c.execute(
+                """delete from categories cc where cc.org_id=$1 and cc.name = any($2::text[])
+                     and not exists (select 1 from products p where p.category_id=cc.id)""",
+                ctx.org_id, made_cats)
         # upload_data / cleaning_runs / cleaning_changes تُحذف بـ cascade.
         await c.execute("delete from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
         # لو الدفعة صارت فاضية، نشيلها كمان حتى ما تظل صفوف يتيمة.
@@ -990,9 +1019,10 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
             if not left:
                 await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     db.cache_clear()
-    await db.audit(ctx.org_id, ctx.user.id, "upload.deleted", "upload", upload_id,
-                   {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n)})
-    return {"ok": True, "deleted": {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n)}}
+    counts = {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n),
+              "branches": _rowcount(br_n), "employees": _rowcount(emp_n), "categories": _rowcount(cat_n)}
+    await db.audit(ctx.org_id, ctx.user.id, "upload.deleted", "upload", upload_id, counts)
+    return {"ok": True, "deleted": counts}
 
 
 @router.delete("/batches/{batch_id}")

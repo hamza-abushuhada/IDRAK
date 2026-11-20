@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useRouter } from "@/lib/router";
-import { Combine, MapPin, Plus } from "lucide-react";
+import { Combine, MapPin, Plus, Trash2 } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiMutation, useApiQuery } from "@/lib/useApi";
@@ -171,6 +171,12 @@ function BranchesCard({ org, owner }: { org: OrgFull; owner: boolean }) {
   // مختلفة بالملفات ("الصويفية" و"Sweifieh")، فتنقسم مبيعاته على صفّين.
   const [merging, setMerging] = useState<string | null>(null);
   const [mergeInto, setMergeInto] = useState("");
+  // حذف فرع فاضي فقط. لو عليه مبيعات بيرفض السيرفر ويطلب الدمج بدلاً منه.
+  const removeBranch = useApiMutation<{ id: string }>("DELETE", (b) => `/org/branches/${b.id}`, {
+    invalidate: ["/org", "/ws/branches", "/insights/dashboard"],
+    errorTitle: tx("Couldn't delete the branch", "ما قدرنا نحذف الفرع"),
+    onSuccess: () => { toast(tx("Branch deleted", "انحذف الفرع")); refresh(); },
+  });
   const merge = useApiMutation<{ into: string }, { moved: { sales: number; employees: number; goals: number } }>(
     "POST", (body) => `/org/branches/${merging}/merge`, {
       invalidate: ["/org", "/ws/branches", "/insights/dashboard", "/ws/sales"],
@@ -198,11 +204,18 @@ function BranchesCard({ org, owner }: { org: OrgFull; owner: boolean }) {
               <div className="flex shrink-0 items-center gap-2">
                 {br.opened_at && <Badge>{tx("since", "من")} <span className="num">{date(br.opened_at, locale, { month: "short", year: "numeric" })}</span></Badge>}
                 {owner && org.branches.length > 1 && !merging && (
-                  <button onClick={() => { setMerging(br.id); setMergeInto(""); }}
-                    className="rounded p-1.5 text-ink-3 transition hover:bg-sand hover:text-ink"
-                    title={tx("Merge into another branch", "ادمج مع فرع ثاني")}>
-                    <Combine size={14} />
-                  </button>
+                  <>
+                    <button onClick={() => { setMerging(br.id); setMergeInto(""); }}
+                      className="rounded p-1.5 text-ink-3 transition hover:bg-sand hover:text-ink"
+                      title={tx("Merge into another branch", "ادمج مع فرع ثاني")}>
+                      <Combine size={14} />
+                    </button>
+                    <button onClick={() => removeBranch.mutate({ id: br.id })}
+                      className="rounded p-1.5 text-ink-3 transition hover:bg-danger/10 hover:text-danger"
+                      title={tx("Delete this branch", "احذف هالفرع")}>
+                      <Trash2 size={14} />
+                    </button>
+                  </>
                 )}
               </div>
             </div>
