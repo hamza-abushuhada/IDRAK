@@ -1,5 +1,5 @@
 export type Branch = { id: string; name: string; name_ar: string | null };
-export type OrgDetail = { id: string; name: string; name_ar: string | null; tax_number: string | null; opening_cash: number; monthly_rent: number; branches: Branch[] };
+export type OrgDetail = { id: string; name: string; name_ar: string | null; tax_number: string | null; opening_cash: number; monthly_rent: number; branches: Branch[]; data_range?: { first_day: string | null; last_day: string | null } };
 
 export type Kpis = { revenue: number; tx: number; discounts: number; voids: number; customers: number; profit: number; units: number; basket: number; margin: number; units_per_tx: number };
 export type Deltas = Partial<Record<"revenue" | "profit" | "tx" | "basket" | "margin" | "customers" | "discounts", number | null>>;
