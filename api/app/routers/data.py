@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 import re
 import uuid
@@ -61,7 +62,14 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
     unmapped = [h for h, m in mapping.items() if not m["field"] and h not in explicit_unused]
     if unmapped:
         samples = {h: [r[i] for r in rows[:8] if r[i] not in (None, "")] for i, h in enumerate(headers)}
-        ai_map = await ai.map_columns(headers, samples, ctx.org_id, ctx.user.id)
+        # الذكاء الاصطناعي بياخد ثواني (وأحياناً يعلّق) — والرفع كله
+        # واقف عليه. القواعد تغطّي أسماء أنظمة الكاشير الشائعة، فندّيه
+        # مهلة قصيرة: يلحق يجاوب، منيح؛ تأخّر، نكمّل ونخلّي العمود
+        # للمستخدم بدل ما ينتظر بلا نهاية.
+        try:
+            ai_map = await asyncio.wait_for(ai.map_columns(headers, samples, ctx.org_id, ctx.user.id), timeout=6)
+        except Exception:
+            ai_map = None
         if ai_map:
             used = {m["field"] for m in mapping.values() if m["field"]}
             for h in unmapped:
@@ -296,8 +304,11 @@ async def get_upload(upload_id: str, ctx: Ctx = Depends(require("view_dashboard"
     u = await db.fetchrow("select * from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
     if not u:
         raise HTTPException(404, "Upload not found")
-    d = await db.fetchrow("select raw_rows from upload_data where upload_id=$1", upload_id)
-    u["preview"] = (d["raw_rows"][:25] if d else [])
+    d = await db.fetchrow(
+        "select (select coalesce(jsonb_agg(e), '[]'::jsonb)"
+        "          from (select e from jsonb_array_elements(raw_rows) e limit 25) t) preview"
+        " from upload_data where upload_id=$1", upload_id)
+    u["preview"] = (d["preview"] if d else []) or []
     u["fields"] = _field_catalog()
     u["entity_label"] = ENTITY_LABELS.get(u["entity"], ENTITY_LABELS["unknown"])
     u["last_run_id"] = await db.fetchval("select id from cleaning_runs where upload_id=$1 order by started_at desc limit 1", upload_id)
