@@ -31,6 +31,19 @@ function DashboardScreen() {
   const [startRaw, setStart] = useParamState("start", "");
   const [endRaw, setEnd] = useParamState("end", "");
   const custom = !!(startRaw && endRaw);
+  // منتقي التاريخ بالمتصفّح بيعرض كل السنوات مهما حدّدنا min/max، فالشخص
+  // بيختار 2022 وبيرجع تقرير فاضي. نقصّ القيمة على نطاق الداتا الفعلي
+  // لحظة الاختيار، فيشوف دايماً رقم صحيح.
+  const firstDay = orgQ.data?.data_range?.first_day || "";
+  const lastDay = orgQ.data?.data_range?.last_day || "";
+  const clamp = (v: string, lo: string, hi: string) => {
+    if (!v) return "";
+    if (lo && v < lo) return lo;
+    if (hi && v > hi) return hi;
+    return v;
+  };
+  const pickStart = (v: string) => setStart(clamp(v, firstDay, endRaw || lastDay));
+  const pickEnd = (v: string) => setEnd(clamp(v, startRaw || firstDay, lastDay));
   const [branch, setBranch] = useParamState("branch_id", "");
   const orgQ = useOrgDetail();
   const q = useApiQuery<Dashboard>(custom
@@ -62,19 +75,25 @@ function DashboardScreen() {
             ]} />
             <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
               {tx("From", "من")}
-              <Input type="date" value={startRaw} max={endRaw || orgQ.data?.data_range?.last_day || undefined}
-                onChange={(e) => setStart(e.target.value)} className="h-9 w-[142px]" />
+              <Input type="date" value={startRaw} min={firstDay || undefined} max={endRaw || lastDay || undefined}
+                onChange={(e) => pickStart(e.target.value)} className="h-9 w-[142px]" />
             </label>
             <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
               {tx("To", "لـ")}
-              <Input type="date" value={endRaw} min={startRaw || orgQ.data?.data_range?.first_day || undefined}
-                max={orgQ.data?.data_range?.last_day || undefined}
-                onChange={(e) => setEnd(e.target.value)} className="h-9 w-[142px]" />
+              <Input type="date" value={endRaw} min={startRaw || firstDay || undefined} max={lastDay || undefined}
+                onChange={(e) => pickEnd(e.target.value)} className="h-9 w-[142px]" />
             </label>
             {custom && (
               <Button variant="ghost" size="sm" onClick={() => { setStart(""); setEnd(""); }}>
                 <RotateCcw size={13} />{tx("Clear", "مسح")}
               </Button>
+            )}
+            {firstDay && lastDay && (
+              <button type="button" onClick={() => { setStart(firstDay); setEnd(lastDay); }}
+                className="text-[12px] text-ink-3 underline underline-offset-4 hover:text-ink"
+                title={tx(`Your data runs ${firstDay} → ${lastDay}`, `داتاك من ${firstDay} لـ ${lastDay}`)}>
+                {tx("All your data", "كل الداتا")}
+              </button>
             )}
           </div>
           <Select data-basira="branch-picker" value={branch} onChange={(e) => setBranch(e.target.value)} className="h-10 min-w-[150px]" aria-label={tx("Branch", "الفرع")}>

@@ -43,6 +43,16 @@ function Sales() {
   const detail = useApiQuery<SaleDetail>(openId ? `/ws/sales/${openId}` : null);
 
   const setFilter = (patch: Record<string, string>) => { setOffset(0); set(patch); };
+  // منتقي التاريخ بالمتصفّح بيعرض كل السنوات مهما حدّدنا min/max. نقصّ
+  // القيمة على نطاق داتاك الفعلي لحظة الاختيار، فيرجع دايماً نتيجة.
+  const firstDay = org.data?.data_range?.first_day || "";
+  const lastDay = org.data?.data_range?.last_day || "";
+  const clamp = (v: string, lo: string, hi: string) => {
+    if (!v) return "";
+    if (lo && v < lo) return lo;
+    if (hi && v > hi) return hi;
+    return v;
+  };
   const hasFilters = !!(branch || status || payment || start || end || q);
   const statusMeta = (s: string) => SALE_STATUSES.find((x) => x.v === s);
   const payLabel = (p: string) => { const x = PAYMENTS.find((i) => i.v === p); return x ? tx(x.en, x.ar) : p; };
@@ -88,19 +98,20 @@ function Sales() {
         </Select>
         <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
           {tx("From", "من")}
-          <Input type="date" value={start} min={org.data?.data_range?.first_day || undefined}
-            max={end || org.data?.data_range?.last_day || undefined}
-            onChange={(e) => setFilter({ start: e.target.value })} className="w-[150px]" />
+          <Input type="date" value={start} min={firstDay || undefined}
+            max={end || lastDay || undefined}
+            onChange={(e) => setFilter({ start: clamp(e.target.value, firstDay, end || lastDay) })} className="w-[150px]" />
         </label>
         <label className="flex items-center gap-1.5 text-[12.5px] text-ink-3">
           {tx("To", "لـ")}
-          <Input type="date" value={end} min={start || org.data?.data_range?.first_day || undefined}
-            max={org.data?.data_range?.last_day || undefined}
-            onChange={(e) => setFilter({ end: e.target.value })} className="w-[150px]" />
+          <Input type="date" value={end} min={start || firstDay || undefined}
+            max={lastDay || undefined}
+            onChange={(e) => setFilter({ end: clamp(e.target.value, start || firstDay, lastDay) })} className="w-[150px]" />
         </label>
-        {org.data?.data_range?.first_day && (
-          <button type="button" onClick={() => setFilter({ start: org.data?.data_range?.first_day || "", end: org.data?.data_range?.last_day || "" })}
-            className="text-[12px] text-ink-3 underline underline-offset-4 hover:text-ink">
+        {firstDay && (
+          <button type="button" onClick={() => setFilter({ start: firstDay, end: lastDay })}
+            className="text-[12px] text-ink-3 underline underline-offset-4 hover:text-ink"
+            title={tx(`Your data runs ${firstDay} → ${lastDay}`, `داتاك من ${firstDay} لـ ${lastDay}`)}>
             {tx("All your data", "كل الداتا")}
           </button>
         )}
