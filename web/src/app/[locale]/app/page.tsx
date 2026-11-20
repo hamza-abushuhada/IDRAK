@@ -31,6 +31,8 @@ function DashboardScreen() {
   const [startRaw, setStart] = useParamState("start", "");
   const [endRaw, setEnd] = useParamState("end", "");
   const custom = !!(startRaw && endRaw);
+  const [branch, setBranch] = useParamState("branch_id", "");
+  const orgQ = useOrgDetail();
   // منتقي التاريخ بالمتصفّح بيعرض كل السنوات مهما حدّدنا min/max، فالشخص
   // بيختار 2022 وبيرجع تقرير فاضي. نقصّ القيمة على نطاق الداتا الفعلي
   // لحظة الاختيار، فيشوف دايماً رقم صحيح.
@@ -44,8 +46,6 @@ function DashboardScreen() {
   };
   const pickStart = (v: string) => setStart(clamp(v, firstDay, endRaw || lastDay));
   const pickEnd = (v: string) => setEnd(clamp(v, startRaw || firstDay, lastDay));
-  const [branch, setBranch] = useParamState("branch_id", "");
-  const orgQ = useOrgDetail();
   const q = useApiQuery<Dashboard>(custom
     ? `/insights/dashboard?start=${startRaw}&end=${endRaw}${branch ? `&branch_id=${branch}` : ""}`
     : `/insights/dashboard?days=${days}${branch ? `&branch_id=${branch}` : ""}`);
