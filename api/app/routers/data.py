@@ -34,7 +34,31 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
     if not headers:
         raise HTTPException(422, "No header row found")
     mapping = auto_map(headers)
-    unmapped = [h for h, m in mapping.items() if not m["field"]]
+    # ربط الأعمدة اللي عدّله المستخدم قبل تنحفظ كقواعد، فملف الشهر الجاي
+    # من نفس نظام الكاشير بينربط لحاله. القيمة الفاضية = "لا تستخدم"
+    # صراحةً، فما نخلّي الذكاء الاصطناعي يرجّعها.
+    remembered = {r["match_value"]: (r["replace_value"] or "")
+                  for r in await db.fetch(
+                      "select match_value, replace_value from cleaning_rules"
+                      " where org_id=$1 and column_kind='column'", ctx.org_id)}
+    explicit_unused: set[str] = set()
+    for h in headers:
+        if h not in remembered:
+            continue
+        want = remembered[h]
+        if want == "":
+            mapping[h] = {"field": None, "confidence": 1.0, "source": "memory"}
+            explicit_unused.add(h)
+        elif want in FIELDS:
+            mapping[h] = {"field": want, "confidence": 1.0, "source": "memory"}
+    seen_fields: set[str] = set()
+    for h in headers:
+        f = mapping[h]["field"]
+        if f and f in seen_fields:
+            mapping[h] = {"field": None, "confidence": 0.0, "source": None}
+        elif f:
+            seen_fields.add(f)
+    unmapped = [h for h, m in mapping.items() if not m["field"] and h not in explicit_unused]
     if unmapped:
         samples = {h: [r[i] for r in rows[:8] if r[i] not in (None, "")] for i, h in enumerate(headers)}
         ai_map = await ai.map_columns(headers, samples, ctx.org_id, ctx.user.id)
@@ -290,8 +314,17 @@ async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("
     if not u:
         raise HTTPException(404)
     cur = u["mapping"] or {}
+    learned = []
     for h, f in m.mapping.items():
         cur[h] = {**(cur.get(h) or {}), "field": f if f in FIELDS else None, "source": "user", "confidence": 1.0}
+        # نحفظ اختيار المستخدم لاسم العمود نفسه، فيرجع يتطبّق تلقائياً
+        # على كل ملف جاي من نفس نظام الكاشير.
+        learned.append((ctx.org_id, "column", h, f if f in FIELDS else "", ctx.user.id))
+    if learned:
+        async with db.transaction() as c:
+            await c.executemany("""insert into cleaning_rules(org_id,column_kind,match_value,replace_value,created_by)
+                                   values($1,$2,$3,$4,$5)
+                                   on conflict (org_id,column_kind,match_value) do update set replace_value=excluded.replace_value""", learned)
     entity = detect_entity({v["field"] for v in cur.values() if v.get("field")})
     await db.execute("update uploads set mapping=$3, entity=$4 where id=$1 and org_id=$2", upload_id, ctx.org_id, cur, entity)
     if u.get("batch_id"):

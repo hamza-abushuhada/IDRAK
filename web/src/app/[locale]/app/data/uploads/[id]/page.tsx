@@ -75,22 +75,41 @@ export default function MappingPage() {
             {u.columns.map((c, ci) => {
               const m = u.mapping[c];
               const samples = u.preview.map((r) => r[ci]).filter((v) => v !== null && v !== "").slice(0, 4);
+              const chosen = mapping[c] ?? "";
+              // حقول أخرى استُخدمت بأعمدة تانية — نخفيها من القائمة.
+              // القائمة كانت ٣٠ خياراً بلا سياق، والشخص يختار واحداً
+              // ويطلع الحقل محجوزاً أصلاً.
+              const takenBy = (field: string) => Object.entries(mapping).find(([col, f]) => col !== c && f === field)?.[0];
+              const options = u.fields.filter((f) => f.key === chosen || !takenBy(f.key));
+              const remembered = m?.source === "memory";
+              const unusedWithData = !chosen && samples.length > 0;
               return (
                 <div key={c} className="grid items-center gap-3 px-5 py-3 md:grid-cols-[1.1fr_1.6fr_1fr]">
                   <div className="min-w-0">
                     <p className="font-medium text-ink">{c}</p>
                     <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-ink-3">
-                      {m?.source === "ai" ? <Badge tone="terra"><Sparkles size={11} />AI · {Math.round((m.confidence || 0) * 100)}%</Badge> : m?.field ? <Badge tone="olive">{tx("Recognized", "معروف")}</Badge> : <Badge>{tx("Not used", "غير مستخدم")}</Badge>}
+                      {remembered ? <Badge tone="olive">{tx("Your saved mapping", "ربطك المحفوظ")}</Badge>
+                        : m?.source === "ai" ? <Badge tone="terra"><Sparkles size={11} />AI · {Math.round((m.confidence || 0) * 100)}%</Badge>
+                        : m?.field ? <Badge tone="olive">{tx("Recognized", "معروف")}</Badge>
+                        : <Badge>{tx("Not used", "غير مستخدم")}</Badge>}
                       {m?.reason && <span className="truncate">{m.reason}</span>}
                     </p>
                   </div>
                   <div className="flex min-w-0 flex-wrap gap-1.5">
                     {samples.map((s, i) => <span key={i} className="max-w-[180px] truncate rounded-md bg-paper-2 px-2 py-0.5 font-mono text-[12px] text-ink-2">{String(s)}</span>)}
                   </div>
-                  <Select value={mapping[c] ?? ""} onChange={(e) => setMapping({ ...mapping, [c]: e.target.value || null })} className="w-full">
-                    <option value="">{tx("— don't use —", "— لا تستخدم —")}</option>
-                    {u.fields.map((f) => <option key={f.key} value={f.key}>{label(f.key)}</option>)}
-                  </Select>
+                  <div className="min-w-0">
+                    <Select value={chosen} onChange={(e) => setMapping({ ...mapping, [c]: e.target.value || null })} className="w-full">
+                      <option value="">{tx("— don't use —", "— لا تستخدم —")}</option>
+                      {options.map((f) => <option key={f.key} value={f.key}>{label(f.key)}</option>)}
+                    </Select>
+                    {unusedWithData && (
+                      <p className="mt-1 text-[11.5px] text-ink-3">
+                        {tx("Has data but isn't mapped — pick what it means, or leave it out.",
+                            "فيه بيانات بس مش مربوط — اختار شو بيمثّل، أو خليه برّا.")}
+                      </p>
+                    )}
+                  </div>
                 </div>
               );
             })}
