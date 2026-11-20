@@ -147,6 +147,7 @@ export const PAYMENTS = [
   { v: "card", en: "Card", ar: "بطاقة" },
   { v: "cliq", en: "CliQ", ar: "كليك" },
   { v: "wallet", en: "Wallet", ar: "محفظة" },
+  { v: "online", en: "Online", ar: "أونلاين" },
 ];
 export const SALE_STATUSES = [
   { v: "completed", en: "Completed", ar: "مكتملة", tone: "olive" as const },

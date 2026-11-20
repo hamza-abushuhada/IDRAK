@@ -484,7 +484,7 @@ def _valid(kind: str, v: str, cleaned: bool) -> bool:
     if kind == "email":
         return bool(P.EMAIL.match(v))
     if kind == "payment":
-        return v in ("cash", "card", "cliq", "wallet")
+        return v in ("cash", "card", "cliq", "wallet", "online")
     if kind == "id":
         return v == v.strip() and not P.has_arabic_digits(v) and v == v.upper()
     return v == clean_text(v)

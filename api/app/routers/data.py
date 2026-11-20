@@ -359,8 +359,10 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     res = engine.run(headers, d["raw_rows"], mapping, ctxk,
                      price_unit=contract.get("price_unit", "jd"), date_order=contract.get("date_order", "auto"))
     memory_hits = sum(1 for c in res["changes"] if c["rule"] == "memory")
+    # الصنف غير الموجود ليس سبباً لتخطّي الصف: الاستيراد ينشئه.
+    # كان هنا فكانت كل صفوف ملف فيه أصناف جديدة تُتخطّى.
     blocking_reasons = {"missing_total", "total_mismatch", "invalid_date", "invalid_number",
-                    "unknown_payment", "unknown_product", "missing_required", "future_date"}
+                    "unknown_payment", "missing_required", "future_date"}
     blocking_flags = [f for f in res["flags"] if f["reason"] in blocking_reasons]
     stats = {"rows_before": res["rows_before"], "rows_after": res["rows_after"], "issues": res["issues"], "clusters": res["clusters"],
              "flags": res["flags"][:500], "flag_count": len(res["flags"]),
@@ -605,7 +607,11 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
 
     upload_id = run["upload_id"]
     entity = run["entity"]
-    stats = {"sales": 0, "lines": 0, "customers": 0, "products_created": 0, "products_updated": 0}
+    stats = {"sales": 0, "lines": 0, "customers": 0, "products_created": 0, "products_updated": 0,
+             "products_no_cost": 0}
+    # لو الملف ما فيه عمود تكلفة، لا نرمي الصفوف: ننشئ الصنف بتكلفة 0
+    # ونعدّها، وننبّه إن الربح ما بينحسب إلا بعد ما تُدخل التكاليف.
+    has_cost_col = "cost" in fmap
     # الفروع اللي أنشأها الاستيراد تلقائياً (اسم الفرع ظهر بالملف وما كان موجود).
     branches_created: list[str] = []
     # الصفوف المتخطّاة: لا نرفض الملف، نجمعها ونعرضها للمستخدم.
@@ -718,6 +724,23 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         existing["category_id"] = cid
                 return existing["id"], existing["cost"]
             if cost is None:
+                if not has_cost_col:
+                    # الملف كله بلا تكلفة — ننشئ الصنف ونكمل، والتنبيه
+                    # يطلع بالملخّص بدل ما نضيّع كل المبيعات.
+                    stored_barcode0 = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
+                    cid0 = await category_id(category) if category else None
+                    pid0 = await c.fetchval(
+                        "insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id)"
+                        " values($1,$2,$3,$4,$5,0,$6,$7) returning id",
+                        ctx.org_id, name, sku, stored_barcode0, price or 0, upload_id, cid0)
+                    product = {"id": pid0, "name": name, "cost": 0, "price": price,
+                               "barcode": stored_barcode0, "sku": sku, "category_id": cid0}
+                    names[k].append(product)
+                    if stored_barcode0:
+                        barcodes[stored_barcode0].append(product)
+                    stats["products_created"] += 1
+                    stats["products_no_cost"] += 1
+                    return pid0, 0
                 raise SkippedRow(
                     f"Unknown product has no cost: {name}. Add it to the catalog or include a cost column",
                     f"صنف جديد بدون تكلفة: {name}. أضفه للكتالوج أو ضمّن عمود تكلفة",
@@ -811,7 +834,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         continue
                     sid = uuid.uuid4()
                     pm = g(r0, "payment_method")
-                    if pm not in ("cash", "card", "cliq", "wallet"):
+                    if pm not in ("cash", "card", "cliq", "wallet", "online"):
                         raise SkippedRow(f"Invoice {inv}: unknown or missing payment method ({pm or 'empty'})",
                                          f"الفاتورة {inv}: طريقة دفع غير معروفة أو مفقودة ({pm or 'فارغ'})", ri0)
                     contract = run["batch_contract"] or {}

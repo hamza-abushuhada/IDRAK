@@ -137,5 +137,8 @@ PAYMENT_METHODS = {
     "card": ["card", "visa", "فيزا", "بطاقة", "بطاقه", "mastercard", "master card", "credit card", "debit", "pos", "ماستر كارد"],
     "cliq": ["cliq", "كليك", "click", "cliq transfer", "تحويل كليك"],
     "wallet": ["wallet", "محفظة", "محفظه", "zain cash", "زين كاش", "orange money", "اورانج موني", "e-wallet", "dinarak", "دينارك"],
+    # "Online" أنظمة التوصيل والتطبيقات — شائعة جداً بالمطاعم بالأردن،
+    # وما كانت معروفة فكانت الصفوف كلها تُعلَّم "طريقة دفع غير معروفة".
+    "online": ["online", "online payment", "e-payment", "epayment", "internet", "app", "تطبيق", "اونلاين", "أونلاين", "انترنت", "إنترنت", "دفع الكتروني"],
 }
 PAYMENT_LOOKUP = {match_key(v): k for k, vs in PAYMENT_METHODS.items() for v in vs}
