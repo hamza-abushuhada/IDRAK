@@ -1,13 +1,14 @@
 "use client";
 import { useParams } from "next/navigation";
 import { useRouter } from "@/lib/router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import { Sparkles, Wand2 } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
 import { ErrorBox, PageHeader, Section } from "@/components/app/kit";
-import { Badge, Button, Select, Skeleton } from "@/components/ui";
+import { Badge, Button, Skeleton } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 
 type Upload = {
@@ -15,6 +16,61 @@ type Upload = {
   mapping: Record<string, { field: string | null; confidence: number; source: string | null; reason?: string }>;
   preview: unknown[][]; fields: { key: string; kind: string; en: string; ar: string }[]; entity_label: [string, string]; last_run_id: string | null;
 };
+
+function FieldPicker({ value, options, labelOf, onChange }: {
+  value: string; options: { key: string }[]; labelOf: (k: string) => string; onChange: (v: string | null) => void;
+}) {
+  const tx = useTx();
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const current = value ? labelOf(value) : tx("— don't use —", "— لا تستخدم —");
+  // التصفية تعمل على الاسم العربي والإنجليزي ومفتاح الحقل معاً، فيكفي
+  // يكتب "خصم" أو "discount" ويلاقيه فوراً.
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return options;
+    return options.filter((f) => `${labelOf(f.key)} ${f.key}`.toLowerCase().includes(s));
+  }, [q, options, labelOf]);
+  return (
+    <div className="relative">
+      <input
+        value={open ? q : current}
+        placeholder={tx("Type to search…", "اكتب للبحث…")}
+        onFocus={() => { setQ(""); setOpen(true); }}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setOpen(false);
+          if (e.key === "Enter" && filtered.length) { onChange(filtered[0].key); setOpen(false); }
+        }}
+        className="h-9 w-full rounded-lg border border-line bg-paper px-3 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-terra/60 focus:ring-2 focus:ring-terra/15"
+      />
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute z-50 mt-1 max-h-56 w-full overflow-auto rounded-lg border border-line bg-paper shadow-[var(--shadow-lift)]">
+            <button type="button" onClick={() => { onChange(null); setOpen(false); }}
+              className="block w-full px-3 py-1.5 text-start text-[12.5px] text-ink-3 hover:bg-sand">
+              {tx("— don't use —", "— لا تستخدم —")}
+            </button>
+            {filtered.map((f) => (
+              <button key={f.key} type="button" onClick={() => { onChange(f.key); setOpen(false); }}
+                className={clsx("block w-full px-3 py-1.5 text-start text-[12.5px] hover:bg-sand",
+                  f.key === value ? "font-medium text-ink" : "text-ink-2")}>
+                {labelOf(f.key)}
+              </button>
+            ))}
+            {!filtered.length && (
+              <p className="px-3 py-2 text-[12px] text-ink-3">
+                {tx("No field matches that name — leave the column out or rename it in the file.",
+                    "ما في حقل بهذا الاسم — خلّي العمود برّا أو غيّر اسمه بالملف.")}
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 export default function MappingPage() {
   const { id } = useParams<{ id: string }>();
@@ -99,10 +155,8 @@ export default function MappingPage() {
                     {samples.map((s, i) => <span key={i} className="max-w-[180px] truncate rounded-md bg-paper-2 px-2 py-0.5 font-mono text-[12px] text-ink-2">{String(s)}</span>)}
                   </div>
                   <div className="min-w-0">
-                    <Select value={chosen} onChange={(e) => setMapping({ ...mapping, [c]: e.target.value || null })} className="w-full">
-                      <option value="">{tx("— don't use —", "— لا تستخدم —")}</option>
-                      {options.map((f) => <option key={f.key} value={f.key}>{label(f.key)}</option>)}
-                    </Select>
+                    <FieldPicker value={chosen} options={options} labelOf={label}
+                      onChange={(v) => setMapping({ ...mapping, [c]: v })} />
                     {unusedWithData && (
                       <p className="mt-1 text-[11.5px] text-ink-3">
                         {tx("Has data but isn't mapped — pick what it means, or leave it out.",
