@@ -1153,8 +1153,15 @@ async def skipped_csv(run_id: str, ctx: Ctx = Depends(require("view_dashboard"))
                     *(data.get(c, "") for c in cols)])
     buf.seek(0)
     fn = (run["fn"] or "import").rsplit(".", 1)[0]
+    # ترويسات HTTP تُرمّز latin-1، واسم الملف عربي فينهار الطلب (كان هذا
+    # سبب "network" عند تنزيل المتخطّاة). الحل: نسخة ASCII للأنظمة القديمة
+    # + filename* بترميز UTF-8 حسب RFC 5987.
+    ascii_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", fn).strip("_") or "import"
+    from urllib.parse import quote
+    disposition = (f'attachment; filename="skipped_{ascii_name}.csv"; '
+                   f"filename*=UTF-8''{quote('skipped_' + fn + '.csv')}")
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
-                             headers={"content-disposition": f'attachment; filename="skipped_{fn}.csv"'})
+                             headers={"content-disposition": disposition})
 
 
 @router.get("/rules")
