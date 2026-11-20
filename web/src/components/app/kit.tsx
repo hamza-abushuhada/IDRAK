@@ -141,10 +141,17 @@ export function useName() {
 export function ErrorBox({ error, retry }: { error: unknown; retry?: () => void }) {
   const tx = useTx();
   const msg = error instanceof Error ? error.message : String(error);
+  // "network" يعني الطلب ما وصل. الواجهة بتشتغل على نفس سيرفر الإنتاج،
+  // فالمستخدم ما بيعرف شو run.ps1 ولا بده يعرف — نطلب منه يعيد المحاولة
+  // ونطمّنه إنه ما في شي ضاع. التفاصيل التقنية تروح لسجلّاتنا.
+  const friendly = msg === "network"
+    ? tx("The server is taking a moment. Nothing was lost — try again in a few seconds.",
+         "السيرفر مشغول شوي. ما ضاع إشي — جرّب بعد ثواني.")
+    : msg;
   return (
     <Card className="border-danger/30 px-6 py-8 text-center">
       <p className="font-serif text-lg text-ink">{tx("Couldn't load this", "ما قدرنا نحمّل هالصفحة")}</p>
-      <p className="mt-1 text-sm text-ink-3">{msg === "network" ? tx("The Idrak API isn't reachable. Start it with api\\run.ps1", "سيرفر إدراك مش شغّال. شغّله من api\\run.ps1") : msg}</p>
+      <p className="mt-1 text-sm text-ink-3">{friendly}</p>
       {retry && <button onClick={retry} className="mt-4 text-sm text-terra underline">{tx("Try again", "جرّب مرة ثانية")}</button>}
     </Card>
   );
