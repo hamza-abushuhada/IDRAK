@@ -165,7 +165,12 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
         if target is None:
             buckets = by_nums.setdefault(nm, {})
             first = mk[:1]
-            for g in buckets.get(first, ()) + buckets.get("", ()):
+            # buckets.get() بترجّع قائمة لو المفتاح موجود و tuple افتراضي
+            # لو مش موجود — جمعهم مع بعض كان يفشل. نطبيع الحالتين لقائمة.
+            cands = list(buckets.get(first, []))
+            if first:
+                cands += buckets.get("", [])
+            for g in cands:
                 if len(mk) > 4 and fuzz.ratio(mk, g["mk"]) >= (90 if loose else 93):
                     target, conf = g, 0.9
                     break
