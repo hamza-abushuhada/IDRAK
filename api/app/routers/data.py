@@ -277,6 +277,13 @@ class UrlIn(BaseModel):
     url: str
 
 
+# المضيفات المسموح بها للوجهة النهائية بعد إعادة التوجيه. الرابط الأصلي مثبّت
+# على docs.google.com، لكن export يعيد التوجيه أحياناً إلى googleusercontent.com.
+# نتحقّق أن الرحلة كلها تبقى داخل جوجل كدفاع عمق ضد إساءة إعادة التوجيه للوصول
+# لموارد داخلية (SSRF).
+_SHEET_HOST_SUFFIXES = (".google.com", ".googleusercontent.com")
+
+
 @router.post("/import-url")
 async def import_url(u: UrlIn, ctx: Ctx = Depends(require("upload_data"))):
     m = re.search(r"docs\.google\.com/spreadsheets/d/([\w-]+)", u.url)
@@ -284,8 +291,15 @@ async def import_url(u: UrlIn, ctx: Ctx = Depends(require("upload_data"))):
         raise HTTPException(422, "Paste a Google Sheets share link (Anyone with the link can view)")
     gid = re.search(r"gid=(\d+)", u.url)
     url = f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv" + (f"&gid={gid.group(1)}" if gid else "")
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cx:
-        r = await cx.get(url)
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, max_redirects=5) as cx:
+            r = await cx.get(url)
+    except httpx.HTTPError as e:
+        # خطأ شبكة أو تجاوز لعدد إعادات التوجيه: نردّ 422 لطيفة بدل 500.
+        raise HTTPException(422, "Couldn't open the sheet. Make sure sharing is set to 'Anyone with the link'.") from e
+    final_host = (r.url.host or "").lower()
+    if not any(final_host.endswith(s) for s in _SHEET_HOST_SUFFIXES):
+        raise HTTPException(422, "Couldn't open the sheet (unexpected redirect).")
     if r.status_code != 200 or "text/html" in r.headers.get("content-type", ""):
         raise HTTPException(422, "Couldn't open the sheet. Make sure sharing is set to 'Anyone with the link'.")
     return await _create_upload(ctx, "google-sheet.csv", r.content, source="google_sheet")

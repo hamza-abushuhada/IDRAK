@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from .. import db
 from ..auth import Ctx, org_ctx
+from ..services import ai as _ai
 from ..services import assistant as A
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
@@ -19,8 +20,29 @@ class ChatIn(BaseModel):
     page: dict | None = None
 
 
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+
 @router.post("/chat")
 async def chat(body: ChatIn, ctx: Ctx = Depends(org_ctx)):
+    # حدّ التكلفة: لو تجاوز المحلّ سقفه اليومي للذكاء الاصطناعي نردّ برسالة
+    # لطيفة بدل تشغيل نموذج مدفوع آخر. نقطعها قبل إنشاء الجلسة/الرسالة فلا
+    # يُحفظ طلب مرفوض. الحدّ مقروء من ai_usage فيصمد عبر نسخ Serverless.
+    if await _ai.over_daily_budget(ctx.org_id):
+        ar = (body.locale or "ar") == "ar"
+        notice = ("وصل محلّك لحدّ استخدام إدراك الذكي مؤقتاً 🙏 جرّب بعد شوي، "
+                  "أو تواصل معنا لرفع الحد.") if ar else \
+                 ("Your shop hit the AI usage limit for now 🙏 Please try again "
+                  "later, or contact us to raise it.")
+
+        async def limited():
+            yield _sse({"type": "text", "delta": notice})
+            yield _sse({"type": "done"})
+
+        return StreamingResponse(limited(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     q: asyncio.Queue = asyncio.Queue()
 
     async def emit(e: dict):
@@ -39,7 +61,7 @@ async def chat(body: ChatIn, ctx: Ctx = Depends(org_ctx)):
         try:
             while True:
                 e = await q.get()
-                yield f"data: {json.dumps(e, ensure_ascii=False, default=str)}\n\n"
+                yield _sse(e)
                 if e.get("type") == "done":
                     break
         finally:

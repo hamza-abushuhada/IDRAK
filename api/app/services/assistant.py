@@ -423,6 +423,11 @@ async def chat(org_id: str, user, role: str, message: str, session_id: str | Non
     model = settings.gemini_model
     retries = 0
     for step in range(10):
+        # حدّ التكلفة داخل الحلقة: الطلب الواحد قد يشغّل حتى ١٠ نداءات مدفوعة.
+        # البوابة عند مدخل الطلب تحمي الخطوة الأولى فقط، فنعيد الفحص قبل كل
+        # خطوة إضافية حتى لا يتجاوز طلب واحد السقف بعدّة أضعاف.
+        if step and await ai.over_daily_budget(org_id):
+            break
         parts_all: list[types.Part] = []
         calls: list[types.FunctionCall] = []
         usage = None
