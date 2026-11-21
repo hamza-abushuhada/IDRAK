@@ -15,6 +15,13 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+// استخراج موحّد لرسالة الخطأ من استجابة فاشلة (كان مكرّراً في 4 دوال).
+async function errorFromResponse(res: Response): Promise<ApiError> {
+  let msg: unknown = res.statusText;
+  try { const j = await res.json(); msg = j.detail || msg; } catch {}
+  return new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
+}
+
 async function headers(extra?: HeadersInit, json = true): Promise<Headers> {
   const h = new Headers(extra);
   const { data } = await supabase().auth.getSession();
@@ -32,11 +39,7 @@ export async function api<T = unknown>(path: string, init: RequestInit & { json?
     body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
     headers: await headers(init.headers, !isForm),
   }).catch(() => { throw new ApiError(0, "network"); });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
-    throw new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
-  }
+  if (!res.ok) throw await errorFromResponse(res);
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") || "";
   return (ct.includes("json") ? res.json() : res.text()) as Promise<T>;
@@ -44,11 +47,7 @@ export async function api<T = unknown>(path: string, init: RequestInit & { json?
 
 export async function streamApi(path: string, body: unknown, onEvent: (e: Record<string, unknown>) => void, signal?: AbortSignal) {
   const res = await fetch(`${API_URL}${path}`, { method: "POST", body: JSON.stringify(body), headers: await headers(), signal });
-  if (!res.ok || !res.body) {
-    let msg = res.statusText;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
-    throw new ApiError(res.status, msg);
-  }
+  if (!res.ok || !res.body) throw await errorFromResponse(res);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -73,11 +72,7 @@ export async function downloadFile(path: string, fallbackName = "download"): Pro
   // نزّل عبر fetch مع التوكن، لأن <a href> لا يرسل Authorization.
   const res = await fetch(`${API_URL}${path}`, { headers: await headers(undefined, true) })
     .catch(() => { throw new ApiError(0, "network"); });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
-    throw new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
-  }
+  if (!res.ok) throw await errorFromResponse(res);
   const cd = res.headers.get("content-disposition") || "";
   const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
   const name = m ? decodeURIComponent(m[1].trim()) : fallbackName;
@@ -99,10 +94,6 @@ export async function publicApi<T = unknown>(path: string, init: RequestInit & {
     body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
     headers: isForm ? init.headers : { "Content-Type": "application/json", ...(init.headers || {}) },
   }).catch(() => { throw new ApiError(0, "network"); });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
-    throw new ApiError(res.status, msg);
-  }
+  if (!res.ok) throw await errorFromResponse(res);
   return res.json();
 }
