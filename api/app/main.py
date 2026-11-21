@@ -41,6 +41,11 @@ _public_rate_limits = {
     "/public/waitlist": (5, 300),
     "/public/health-check": (3, 600),
 }
+# ملاحظة: هذا العدّاد في ذاكرة النسخة الواحدة. على Serverless (Vercel) كل نسخة
+# لها عدّادها، فالحدّ الفعلي = الحدّ × عدد النسخ الحيّة ويُصفَّر مع كل بداية
+# باردة؛ يبقى "أفضل جهد" ضد الإساءة البسيطة. للحماية المتينة في الإنتاج استخدم
+# جدار حماية Vercel أو متجراً مشتركاً (Upstash/جدول). حدّ تكلفة الذكاء الاصطناعي
+# المدفوع مطبَّق على مستوى قاعدة البيانات (services/ai.over_daily_budget) فيصمد.
 _public_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 

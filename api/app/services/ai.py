@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 from google import genai
 from google.genai import types
@@ -11,6 +12,39 @@ log = logging.getLogger("idrak.ai")
 _client: genai.Client | None = None
 
 PRICE_IN, PRICE_OUT = 0.30, 2.50
+
+# سقف تكلفة الذكاء الاصطناعي لكل مؤسسة خلال ٢٤ ساعة (بالدولار). يمنع عضواً
+# واحداً من تضخيم فاتورة Gemini بتكرار الطلبات. يُقرأ من ai_usage فيصمد عبر
+# نسخ Serverless (لا يعتمد على عدّاد في الذاكرة). الافتراضي سخيّ للاستخدام
+# الحقيقي لمحلّ صغير لكنه يوقف الإساءة الجامحة. 0 = تعطيل الحدّ.
+try:
+    AI_DAILY_BUDGET_USD = float(os.getenv("AI_DAILY_BUDGET_USD", "3.0") or 0)
+except ValueError:
+    # قيمة بيئة غير رقمية يجب ألا تُسقط إقلاع الخدمة كلها (النشر تلقائي
+    # للإنتاج). نرجع للافتراضي مع تحذير بدل تعطيل الـAPI بالكامل.
+    log.warning("AI_DAILY_BUDGET_USD is not a number; falling back to 3.0")
+    AI_DAILY_BUDGET_USD = 3.0
+
+
+async def org_spend_today_usd(org_id) -> float:
+    """مجموع تكلفة الذكاء الاصطناعي لهذه المؤسسة في آخر ٢٤ ساعة."""
+    v = await db.fetchval(
+        "select coalesce(sum(cost_usd), 0) from ai_usage"
+        " where org_id=$1 and created_at > now() - interval '1 day'",
+        org_id)
+    return float(v or 0)
+
+
+async def over_daily_budget(org_id) -> bool:
+    """هل تجاوزت المؤسسة سقف تكلفة الذكاء الاصطناعي اليومي؟"""
+    if AI_DAILY_BUDGET_USD <= 0:
+        return False
+    try:
+        return await org_spend_today_usd(org_id) >= AI_DAILY_BUDGET_USD
+    except Exception:
+        # فشل الاستعلام لا يجوز أن يمنع المستخدم الشرعي: نفشل مفتوحاً.
+        log.warning("budget check failed for org %s", org_id)
+        return False
 
 
 def client() -> genai.Client:
