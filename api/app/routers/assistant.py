@@ -26,10 +26,10 @@ def _sse(event: dict) -> str:
 
 @router.post("/chat")
 async def chat(body: ChatIn, ctx: Ctx = Depends(org_ctx)):
-    # حدّ التكلفة: لو تجاوز المحلّ سقفه اليومي للذكاء الاصطناعي نردّ برسالة
-    # لطيفة بدل تشغيل نموذج مدفوع آخر. نقطعها قبل إنشاء الجلسة/الرسالة فلا
-    # يُحفظ طلب مرفوض. الحدّ مقروء من ai_usage فيصمد عبر نسخ Serverless.
-    if await _ai.over_daily_budget(ctx.org_id):
+    # حدّ التكلفة: نحجز حصّة ونفحص السقف ذرّياً قبل إنشاء الجلسة/الرسالة. لو
+    # تجاوز المحلّ سقفه اليومي نردّ برسالة لطيفة بدل تشغيل نموذج مدفوع، فلا
+    # يُحفظ طلب مرفوض. الحجز يُحرَّر في نهاية العامل أدناه.
+    if not await _ai.budget_reserve(ctx.org_id):
         ar = (body.locale or "ar") == "ar"
         notice = ("وصل محلّك لحدّ استخدام إدراك الذكي مؤقتاً 🙏 جرّب بعد شوي، "
                   "أو تواصل معنا لرفع الحد.") if ar else \
@@ -54,6 +54,10 @@ async def chat(body: ChatIn, ctx: Ctx = Depends(org_ctx)):
         except Exception as e:
             await q.put({"type": "error", "text": str(e)[:300]})
             await q.put({"type": "done"})
+        finally:
+            # نحرّر الحجز بعد انتهاء الطلب (نجح أو فشل أو أُلغي)؛ التكلفة
+            # الفعلية بقيت مسجّلة على العدّاد عبر ai.track.
+            await _ai.budget_release(ctx.org_id)
 
     task = asyncio.create_task(worker())
 
