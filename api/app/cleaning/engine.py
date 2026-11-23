@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from rapidfuzz import fuzz, process
 
+from . import money as M
 from . import parsers as P
 from .arabic import clean_text, is_arabic, is_null, match_key, nums, skeleton, smart_title
 from .fields import REQUIRED, detect_entity, kind_of
@@ -21,6 +22,7 @@ RULES = {
     "hijri_date": ("Hijri dates converted to Gregorian", "تحويل التواريخ الهجرية إلى ميلادية", "format"),
     "money_format": ("Currency text removed from amounts (JD, د.ا)", "إزالة رموز العملة من المبالغ (JD، د.ا)", "format"),
     "fils_to_jd": ("Amounts converted from fils to JOD using the import settings", "تحويل المبالغ من فلس إلى دينار حسب إعدادات الاستيراد", "format"),
+    "fils_detected": ("Amounts written in fils converted to JOD (3250 → 3.250)", "مبالغ مكتوبة بالفلس تحوّلت لدينار (3250 ← 3.250)", "fix"),
     "decimal_comma": ("Decimal commas fixed (0,350 → 0.350)", "تصحيح الفاصلة العشرية (0,350 ← 0.350)", "format"),
     "quantity_format": ("Quantities converted to plain numbers", "تحويل الكميات إلى أرقام", "format"),
     "phone_e164": ("Phone numbers standardized to +962 format", "توحيد أرقام الهواتف بصيغة 962+", "format"),
@@ -52,8 +54,9 @@ FLAGS = {
     "unknown_product": ("Products not in your catalog", "أصناف غير موجودة بقائمتك"),
     "missing_total": ("Line total is missing", "إجمالي السطر ناقص"),
     "total_mismatch": ("Line total does not match quantity × unit price", "إجمالي السطر لا يطابق الكمية × سعر الوحدة"),
+    "money_outlier": ("Amounts far out of scale (fils or a typo?)", "مبالغ بعيدة جداً عن الباقي (فلس أو غلطة؟)"),
 }
-PRIORITY = ["memory", "fils_to_jd", "product_match", "person_match", "branch_map", "payment_map", "city_map",
+PRIORITY = ["memory", "fils_to_jd", "fils_detected", "product_match", "person_match", "branch_map", "payment_map", "city_map",
             "value_merge", "hijri_date", "excel_date", "email_fix", "phone_e164", "date_format", "decimal_comma", "money_format",
             "quantity_format", "arabic_digits", "id_format", "title_case", "gender_map", "null_token", "whitespace"]
 CATEGORICAL = {"product", "person", "branch", "payment", "city", "area", "category", "company", "gender"}
@@ -227,6 +230,25 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
 
     blank = {ri for ri, r in enumerate(raw) if all(not clean_text(v) for v in r)}
 
+    def number(ri, ci):
+        cell = rows[ri][ci] if ci < len(rows[ri]) else None
+        return P.parse_number(cell if isinstance(cell, (int, float)) else raw[ri][ci])[0]
+
+    # Fils mixed into dinar columns (cleaning/money.py), decided across columns:
+    # a product's other rows, quantity x price and cost vs price all count.
+    fils_fix: dict[str, dict[int, float]] = {}
+    fils_review: dict[str, set[int]] = {}
+    if price_unit != "fils":
+        money_cols = {f: [number(ri, col_idx[h]) for ri in range(n)]
+                      for h, f in fields.items() if kind_of(f) == "money"}
+        if money_cols:
+            prod_h = next((x for x, ff in fields.items() if ff == "product"), None)
+            qty_h = next((x for x, ff in fields.items() if ff == "quantity"), None)
+            fils_fix, fils_review = M.detect(
+                money_cols,
+                [match_key(raw[ri][col_idx[prod_h]]) or None for ri in range(n)] if prod_h else None,
+                [number(ri, col_idx[qty_h]) for ri in range(n)] if qty_h else None)
+
     for h in headers:
         ci, f = col_idx[h], fields[h]
         kind = kind_of(f)
@@ -288,6 +310,12 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                 conf = 1.0
                 if kind == "money" and price_unit == "fils":
                     v, rule = v / 1000, "fils_to_jd"
+                elif kind == "money" and M.FILS_WORD.search(vals[ri]):
+                    v, rule = v / 1000, "fils_detected"  # "500 فلس" says so itself
+                elif kind == "money" and ri in fils_fix.get(f, {}):
+                    v, rule, conf = fils_fix[f][ri], "fils_detected", 0.9
+                elif kind == "money" and ri in fils_review.get(f, set()):
+                    flags.append(Flag(ri, h, vals[ri], "money_outlier"))
                 if kind == "quantity":
                     if v < 0:
                         flags.append(Flag(ri, h, vals[ri], "negative_qty"))
