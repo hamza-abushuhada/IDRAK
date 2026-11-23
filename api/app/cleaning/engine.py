@@ -8,9 +8,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from rapidfuzz import fuzz, process
 
+from . import bilingual as B
 from . import money as M
 from . import parsers as P
-from .arabic import clean_text, is_arabic, is_null, match_key, nums, skeleton, smart_title
+from .arabic import clean_text, is_arabic, is_null, match_key, nums, place_key, skeleton, smart_title
 from .fields import REQUIRED, detect_entity, kind_of
 
 RULES = {
@@ -140,13 +141,17 @@ def subset_match(a: str, b: str) -> bool:
 
 
 class Matcher:
-    def __init__(self, entries: list[dict], loose: bool = False):
+    def __init__(self, entries: list[dict], loose: bool = False, places: bool = False):
         self.entries = entries
         self.loose = loose
         self.keys, self.owner, self.skel, self.knums = [], [], {}, []
         self.exact: dict[str, int] = {}
+        # Branches: every spelling of the same place is an exact match ("فرع خلدا" = "Khalda").
+        self.places: dict[str, int] = {}
         for i, e in enumerate(entries):
             for k in e["keys"]:
+                if places and match_key(k):
+                    self.places.setdefault(place_key(k), i)
                 mk = match_key(k)
                 if mk:
                     self.keys.append(mk)
@@ -163,6 +168,8 @@ class Matcher:
             return None, 0
         if k in self.exact:
             return self.entries[self.exact[k]]["name"], 1.0
+        if self.places and (pk := place_key(value)) in self.places:
+            return self.entries[self.places[pk]]["name"], 0.95
         vn = nums(value)
         cands = [i for i, kn in enumerate(self.knums) if kn == vn] if vn else list(range(len(self.keys)))
         if not cands:
@@ -204,6 +211,8 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
         if not disp:
             continue
         mk, sk, nm, ar = match_key(disp), skeleton(disp), tuple(nums(disp)), is_arabic(disp)
+        if kind == "branch":
+            mk = place_key(disp)  # "Khalda", "خلدا", "فرع خلدا" are one exact key
         target, conf = exact.get(mk), 1.0
         # Business names bucket by their first distinctive word, so "مؤسسة الرائد"
         # meets "الرائد تجارة" (they start with different letters).
@@ -223,9 +232,12 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
                 if sk and sk == g["sk"] and ar != g["ar"] and len(sk.replace(" ", "")) >= (3 if loose else 4):
                     target, conf = g, 0.8
                     break
-                if loose and min(len(mk), len(g["mk"])) >= 4 and subset_match(mk, g["mk"]):
-                    target, conf = g, 0.75
-                    break
+            if target is None and loose:
+                # "Irbid" inside "Irbid - University St" merges only when it fits one group:
+                # with two Irbid branches a bare "Irbid" can't be placed.
+                fits = [g for g in cands if min(len(mk), len(g["mk"])) >= 4 and subset_match(mk, g["mk"])]
+                if len({id(g) for g in fits}) == 1:
+                    target, conf = fits[0], 0.75
         if target is None:
             g = {"mk": mk, "sk": sk, "nums": nm, "ar": ar, "canon": disp, "members": [(raw, 1.0, cnt)]}
             groups.append(g)
@@ -409,7 +421,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             if kind == "product" and ctx.products:
                 matcher = Matcher(ctx.products)
             elif kind == "branch" and ctx.branches:
-                matcher = Matcher(ctx.branches, loose=True)
+                matcher = Matcher(ctx.branches, loose=True, places=True)
             elif kind == "person" and f == "cashier" and ctx.employees:
                 matcher = Matcher(ctx.employees)
             fallback = cluster_values(counts, kind) if kind in ("product", "person", "branch", "area", "category", "company") else {}
@@ -474,6 +486,8 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                     clusters.append({"column": h, "field": f, "canonical": canon,
                                      "variants": [{"value": m, "count": c} for m, c in members.most_common()],
                                      "rows": sum(members.values())})
+
+    _pair_languages(headers, fields, col_idx, clean, blank, ctx, record, clusters)
 
     qi = next((col_idx[x] for x, ff in fields.items() if ff == "quantity"), None)
     pi = next((col_idx[x] for x, ff in fields.items() if ff == "unit_price"), None)
@@ -566,6 +580,51 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         "clean_rows": kept,
         "removed_rows": sorted(removed),
     }
+
+
+def _pair_languages(headers, fields, col_idx, clean, blank, ctx, record, clusters) -> None:
+    """English and Arabic names of one dish become one product (cleaning/bilingual.py).
+
+    Runs on the cleaned values, so prices compare after fils are fixed. Each
+    pairing is a "product_match" change the user reviews like any other merge.
+    """
+    prod_h = next((x for x, ff in fields.items() if ff == "product"), None)
+    price_h = next((x for x, ff in fields.items() if ff == "unit_price"), None)
+    if not prod_h or not price_h:
+        return
+    cat_h = next((x for x, ff in fields.items() if ff == "category"), None)
+    pci, prci = col_idx[prod_h], col_idx[price_h]
+    names: dict[str, dict] = {}
+    for ri, row in enumerate(clean):
+        if ri in blank or not row[pci]:
+            continue
+        d = names.setdefault(row[pci], {"prices": [], "cats": Counter(), "rows": []})
+        d["rows"].append(ri)
+        try:
+            d["prices"].append(float(row[prci]))
+        except (TypeError, ValueError):
+            pass
+        if cat_h and row[col_idx[cat_h]]:
+            d["cats"][row[col_idx[cat_h]]] += 1
+
+    def summary(d):
+        return (statistics.median(d["prices"]) if d["prices"] else None,
+                d["cats"].most_common(1)[0][0] if d["cats"] else None)
+
+    english = {nm: summary(d) for nm, d in names.items() if not is_arabic(nm)}
+    if not english:
+        return
+    arabic = {nm: summary(d) for nm, d in names.items() if is_arabic(nm)}
+    for p in ctx.products:  # the catalog's Arabic names count too, at their saved price
+        if is_arabic(p["name"]) and p.get("price") and p["name"] not in arabic:
+            arabic[p["name"]] = (float(p["price"]), None)
+    for en, (ar, sc) in B.pair(english, arabic).items():
+        for ri in names[en]["rows"]:
+            record(ri, pci, ar, "product_match", sc, group=f"{prod_h}::{ar}")
+        clusters.append({"column": prod_h, "field": "product", "canonical": ar,
+                         "variants": [{"value": ar, "count": len(names.get(ar, {}).get("rows", []))},
+                                      {"value": en, "count": len(names[en]["rows"])}],
+                         "rows": len(names.get(ar, {}).get("rows", [])) + len(names[en]["rows"])})
 
 
 def _valid(kind: str, v: str, cleaned: bool) -> bool:

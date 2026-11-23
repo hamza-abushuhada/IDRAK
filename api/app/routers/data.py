@@ -14,7 +14,7 @@ from .. import db
 from ..auth import Ctx, require
 from ..cleaning import engine
 from ..cleaning import parsers as cleaning_parsers
-from ..cleaning.arabic import match_key
+from ..cleaning.arabic import match_key, place_key
 from ..cleaning.context import load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
@@ -795,7 +795,13 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     continue
         skipped.append({"row": row_index, "reason": reason, "reason_ar": reason_ar, "data": snapshot})
     async with db.transaction() as c:
-        branches = {match_key(b["name"]): b["id"] for b in await c.fetch("select id,name from branches where org_id=$1", ctx.org_id)}
+        # Keyed by place, so "فرع خلدا" in this file finds the existing "Khalda" branch
+        # instead of creating a second one (cleaning/arabic.py: place_key).
+        branches: dict[str, str] = {}
+        for b in await c.fetch("select id,name,name_ar from branches where org_id=$1 order by created_at", ctx.org_id):
+            for nm in (b["name"], b["name_ar"]):
+                if nm:
+                    branches.setdefault(place_key(nm), b["id"])
         emps = {match_key(e["full_name"]): e["id"] for e in await c.fetch("select id, full_name from employees where org_id=$1", ctx.org_id)}
         product_rows = [dict(p) for p in await c.fetch("select id,name,cost,price,barcode,sku,category_id from products where org_id=$1", ctx.org_id)]
         names: dict[str, list[dict]] = defaultdict(list)
@@ -866,7 +872,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             الإنشاء هنا يحفظ الاسم كما ورد في الملف، والتنظيف يوحّد
             الأشكال المختلفة قبل الوصول لهنا.
             """
-            k = match_key(name)
+            k = place_key(name)
             if k in branches:
                 return branches[k]
             bid = await c.fetchval(
