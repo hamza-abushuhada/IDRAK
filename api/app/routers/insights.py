@@ -14,11 +14,10 @@ router = APIRouter(tags=["insights"])
 
 
 @router.get("/insights/dashboard")
-async def dashboard(days: int = 30, branch_id: str | None = None, start: str | None = None, end: str | None = None,
+async def dashboard(days: int = 30, branch_id: str | None = None, start: dt.date | None = None, end: dt.date | None = None,
                     ctx: Ctx = Depends(require("view_dashboard"))):
-    s = dt.date.fromisoformat(start) if start else None
-    e = dt.date.fromisoformat(end) if end else None
-    return await I.dashboard(ctx.org_id, max(7, min(days, 365)), branch_id, s, e)
+    # Typed as dates so a malformed date is a 422, not a 500 from fromisoformat.
+    return await I.dashboard(ctx.org_id, max(7, min(days, 365)), branch_id, start, end)
 
 
 @router.get("/insights/leaks")

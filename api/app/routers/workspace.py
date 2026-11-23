@@ -1,3 +1,5 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -10,7 +12,9 @@ router = APIRouter(prefix="/ws", tags=["workspace"])
 
 @router.get("/sales")
 async def sales(q: str | None = None, branch_id: str | None = None, status: str | None = None, payment: str | None = None,
-                start: str | None = None, end: str | None = None, offset: int = 0, limit: int = 50, ctx: Ctx = Depends(require("view_sales"))):
+                start: dt.date | None = None, end: dt.date | None = None, offset: int = 0, limit: int = 50, ctx: Ctx = Depends(require("view_sales"))):
+    # start/end are typed as dates: asyncpg needs a date object for "?::date"
+    # and failed on the raw "2024-07-25" string, so every date filter here 500'd.
     where, args = ["s.org_id=$1"], [ctx.org_id]
 
     def add(cond, v):
