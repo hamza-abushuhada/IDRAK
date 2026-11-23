@@ -8,8 +8,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from rapidfuzz import fuzz, process
 
+from . import bilingual as B
+from . import money as M
 from . import parsers as P
-from .arabic import clean_text, is_arabic, is_null, match_key, nums, skeleton, smart_title
+from .arabic import clean_text, is_arabic, is_null, match_key, nums, place_key, skeleton, smart_title
 from .fields import REQUIRED, detect_entity, kind_of
 
 RULES = {
@@ -21,6 +23,7 @@ RULES = {
     "hijri_date": ("Hijri dates converted to Gregorian", "تحويل التواريخ الهجرية إلى ميلادية", "format"),
     "money_format": ("Currency text removed from amounts (JD, د.ا)", "إزالة رموز العملة من المبالغ (JD، د.ا)", "format"),
     "fils_to_jd": ("Amounts converted from fils to JOD using the import settings", "تحويل المبالغ من فلس إلى دينار حسب إعدادات الاستيراد", "format"),
+    "fils_detected": ("Amounts written in fils converted to JOD (3250 → 3.250)", "مبالغ مكتوبة بالفلس تحوّلت لدينار (3250 ← 3.250)", "fix"),
     "decimal_comma": ("Decimal commas fixed (0,350 → 0.350)", "تصحيح الفاصلة العشرية (0,350 ← 0.350)", "format"),
     "quantity_format": ("Quantities converted to plain numbers", "تحويل الكميات إلى أرقام", "format"),
     "phone_e164": ("Phone numbers standardized to +962 format", "توحيد أرقام الهواتف بصيغة 962+", "format"),
@@ -52,8 +55,9 @@ FLAGS = {
     "unknown_product": ("Products not in your catalog", "أصناف غير موجودة بقائمتك"),
     "missing_total": ("Line total is missing", "إجمالي السطر ناقص"),
     "total_mismatch": ("Line total does not match quantity × unit price", "إجمالي السطر لا يطابق الكمية × سعر الوحدة"),
+    "money_outlier": ("Amounts far out of scale (fils or a typo?)", "مبالغ بعيدة جداً عن الباقي (فلس أو غلطة؟)"),
 }
-PRIORITY = ["memory", "fils_to_jd", "product_match", "person_match", "branch_map", "payment_map", "city_map",
+PRIORITY = ["memory", "fils_to_jd", "fils_detected", "product_match", "person_match", "branch_map", "payment_map", "city_map",
             "value_merge", "hijri_date", "excel_date", "email_fix", "phone_e164", "date_format", "decimal_comma", "money_format",
             "quantity_format", "arabic_digits", "id_format", "title_case", "gender_map", "null_token", "whitespace"]
 CATEGORICAL = {"product", "person", "branch", "payment", "city", "area", "category", "company", "gender"}
@@ -102,14 +106,52 @@ def _fmt_num(x: float, money: bool) -> str:
     return str(int(x)) if float(x).is_integer() else f"{x:.3f}".rstrip("0").rstrip(".")
 
 
+# Words that say what kind of business a name is, or how much of a product, not
+# which one (already in match_key form). Fuzzy "one shared word is enough" matching
+# merged "Al Wafa Trading" into "Al Najah Food" (both "al") and a garlic sack into
+# "Mixed Grill 1kg" (both "kg"); these words never count as the shared one.
+GENERIC = frozenset("""
+    al el the co company est establishment trading trade traders import imports export distribution dist
+    distributors food foods supplies supply group jordan jordanian international intl ltd llc inc factory
+    industries of and for with
+    شركه موسسه تجاره للتجاره لتجاره تجاريه توزيع للتوزيع استيراد تصدير مواد للمواد غذاييه اغذيه للاغذيه
+    توريدات للتوريدات مجموعه اردن اردني اردنيه دوليه مصنع مصانع صناعات لصناعه مع و ذ م
+    ml l g kg pc can ctn
+""".split())
+
+
+def core_words(mk: str) -> list[str]:
+    """The words of a match_key that tell one name from another."""
+    return [t for t in mk.split() if t not in GENERIC and not t.replace(".", "").isdigit()]
+
+
+def subset_match(a: str, b: str) -> bool:
+    """Every distinctive word of the shorter name is in the longer one (spelling slips allowed).
+
+    "Al Maha Dairy" ~ "Al Maha Dairy Jordan", "الرائد تجارة" ~ "مؤسسة الرائد التجارية";
+    but not "Al Wafa Trading" ~ "Al Najah Food", nor "خبز شاورما" ~ "وجبة شاورما لحم".
+    """
+    ca, cb = core_words(a), core_words(b)
+    if not ca or not cb:
+        return False
+    short, long_ = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    if sum(len(t) for t in short) < 4:
+        return False
+    return all(any(t == u or (min(len(t), len(u)) >= 4 and fuzz.ratio(t, u) >= 85) for u in long_) for t in short)
+
+
 class Matcher:
-    def __init__(self, entries: list[dict], loose: bool = False):
+    def __init__(self, entries: list[dict], loose: bool = False, places: bool = False):
         self.entries = entries
         self.loose = loose
         self.keys, self.owner, self.skel, self.knums = [], [], {}, []
         self.exact: dict[str, int] = {}
+        # Branches: every spelling of the same place is an exact match ("فرع خلدا" = "Khalda").
+        self.places: dict[str, int] = {}
         for i, e in enumerate(entries):
             for k in e["keys"]:
+                if places and match_key(k):
+                    self.places.setdefault(place_key(k), i)
                 mk = match_key(k)
                 if mk:
                     self.keys.append(mk)
@@ -126,6 +168,8 @@ class Matcher:
             return None, 0
         if k in self.exact:
             return self.entries[self.exact[k]]["name"], 1.0
+        if self.places and (pk := place_key(value)) in self.places:
+            return self.entries[self.places[pk]]["name"], 0.95
         vn = nums(value)
         cands = [i for i, kn in enumerate(self.knums) if kn == vn] if vn else list(range(len(self.keys)))
         if not cands:
@@ -137,9 +181,15 @@ class Matcher:
         sk = skeleton(value)
         if sk in self.skel and nums(self.entries[self.skel[sk]]["name"]) == vn:
             return self.entries[self.skel[sk]]["name"], 0.8
-        best = process.extractOne(k, ckeys, scorer=fuzz.partial_token_set_ratio)
-        if best and best[1] >= (90 if self.loose else 95) and len(k) >= 4:
-            return self.entries[self.owner[cands[best[2]]]]["name"], 0.7
+        # One name inside the other ("بيبسي" in "بيبسي 330 مل علبة"). partial_token_set_ratio
+        # alone scores 100 on a single shared word, so it only shortlists; subset_match
+        # decides, and two different catalog products matching means it's ambiguous.
+        if len(k) >= 4:
+            shortlist = process.extract(k, ckeys, scorer=fuzz.partial_token_set_ratio,
+                                        score_cutoff=90 if self.loose else 95, limit=25)
+            owners = {self.owner[cands[i]] for _, _, i in shortlist if subset_match(k, ckeys[i])}
+            if len(owners) == 1:
+                return self.entries[owners.pop()]["name"], 0.7
         return None, 0
 
 
@@ -161,10 +211,15 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
         if not disp:
             continue
         mk, sk, nm, ar = match_key(disp), skeleton(disp), tuple(nums(disp)), is_arabic(disp)
+        if kind == "branch":
+            mk = place_key(disp)  # "Khalda", "خلدا", "فرع خلدا" are one exact key
         target, conf = exact.get(mk), 1.0
+        # Business names bucket by their first distinctive word, so "مؤسسة الرائد"
+        # meets "الرائد تجارة" (they start with different letters).
+        bucket_key = " ".join(core_words(mk)) or mk if loose else mk
         if target is None:
             buckets = by_nums.setdefault(nm, {})
-            first = mk[:1]
+            first = bucket_key[:1]
             # buckets.get() بترجّع قائمة لو المفتاح موجود و tuple افتراضي
             # لو مش موجود — جمعهم مع بعض كان يفشل. نطبيع الحالتين لقائمة.
             cands = list(buckets.get(first, []))
@@ -177,13 +232,16 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
                 if sk and sk == g["sk"] and ar != g["ar"] and len(sk.replace(" ", "")) >= (3 if loose else 4):
                     target, conf = g, 0.8
                     break
-                if loose and min(len(mk), len(g["mk"])) >= 4 and fuzz.partial_token_set_ratio(mk, g["mk"]) >= 95:
-                    target, conf = g, 0.75
-                    break
+            if target is None and loose:
+                # "Irbid" inside "Irbid - University St" merges only when it fits one group:
+                # with two Irbid branches a bare "Irbid" can't be placed.
+                fits = [g for g in cands if min(len(mk), len(g["mk"])) >= 4 and subset_match(mk, g["mk"])]
+                if len({id(g) for g in fits}) == 1:
+                    target, conf = fits[0], 0.75
         if target is None:
             g = {"mk": mk, "sk": sk, "nums": nm, "ar": ar, "canon": disp, "members": [(raw, 1.0, cnt)]}
             groups.append(g)
-            by_nums.setdefault(nm, {}).setdefault(mk[:1], []).append(g)
+            by_nums.setdefault(nm, {}).setdefault(bucket_key[:1], []).append(g)
             exact[mk] = g
         else:
             target["members"].append((raw, conf, cnt))
@@ -226,6 +284,25 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             pass
 
     blank = {ri for ri, r in enumerate(raw) if all(not clean_text(v) for v in r)}
+
+    def number(ri, ci):
+        cell = rows[ri][ci] if ci < len(rows[ri]) else None
+        return P.parse_number(cell if isinstance(cell, (int, float)) else raw[ri][ci])[0]
+
+    # Fils mixed into dinar columns (cleaning/money.py), decided across columns:
+    # a product's other rows, quantity x price and cost vs price all count.
+    fils_fix: dict[str, dict[int, float]] = {}
+    fils_review: dict[str, set[int]] = {}
+    if price_unit != "fils":
+        money_cols = {f: [number(ri, col_idx[h]) for ri in range(n)]
+                      for h, f in fields.items() if kind_of(f) == "money"}
+        if money_cols:
+            prod_h = next((x for x, ff in fields.items() if ff == "product"), None)
+            qty_h = next((x for x, ff in fields.items() if ff == "quantity"), None)
+            fils_fix, fils_review = M.detect(
+                money_cols,
+                [match_key(raw[ri][col_idx[prod_h]]) or None for ri in range(n)] if prod_h else None,
+                [number(ri, col_idx[qty_h]) for ri in range(n)] if qty_h else None)
 
     for h in headers:
         ci, f = col_idx[h], fields[h]
@@ -288,6 +365,12 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                 conf = 1.0
                 if kind == "money" and price_unit == "fils":
                     v, rule = v / 1000, "fils_to_jd"
+                elif kind == "money" and M.FILS_WORD.search(vals[ri]):
+                    v, rule = v / 1000, "fils_detected"  # "500 فلس" says so itself
+                elif kind == "money" and ri in fils_fix.get(f, {}):
+                    v, rule, conf = fils_fix[f][ri], "fils_detected", 0.9
+                elif kind == "money" and ri in fils_review.get(f, set()):
+                    flags.append(Flag(ri, h, vals[ri], "money_outlier"))
                 if kind == "quantity":
                     if v < 0:
                         flags.append(Flag(ri, h, vals[ri], "negative_qty"))
@@ -338,7 +421,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             if kind == "product" and ctx.products:
                 matcher = Matcher(ctx.products)
             elif kind == "branch" and ctx.branches:
-                matcher = Matcher(ctx.branches, loose=True)
+                matcher = Matcher(ctx.branches, loose=True, places=True)
             elif kind == "person" and f == "cashier" and ctx.employees:
                 matcher = Matcher(ctx.employees)
             fallback = cluster_values(counts, kind) if kind in ("product", "person", "branch", "area", "category", "company") else {}
@@ -403,6 +486,8 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                     clusters.append({"column": h, "field": f, "canonical": canon,
                                      "variants": [{"value": m, "count": c} for m, c in members.most_common()],
                                      "rows": sum(members.values())})
+
+    _pair_languages(headers, fields, col_idx, clean, blank, ctx, record, clusters)
 
     qi = next((col_idx[x] for x, ff in fields.items() if ff == "quantity"), None)
     pi = next((col_idx[x] for x, ff in fields.items() if ff == "unit_price"), None)
@@ -495,6 +580,51 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         "clean_rows": kept,
         "removed_rows": sorted(removed),
     }
+
+
+def _pair_languages(headers, fields, col_idx, clean, blank, ctx, record, clusters) -> None:
+    """English and Arabic names of one dish become one product (cleaning/bilingual.py).
+
+    Runs on the cleaned values, so prices compare after fils are fixed. Each
+    pairing is a "product_match" change the user reviews like any other merge.
+    """
+    prod_h = next((x for x, ff in fields.items() if ff == "product"), None)
+    price_h = next((x for x, ff in fields.items() if ff == "unit_price"), None)
+    if not prod_h or not price_h:
+        return
+    cat_h = next((x for x, ff in fields.items() if ff == "category"), None)
+    pci, prci = col_idx[prod_h], col_idx[price_h]
+    names: dict[str, dict] = {}
+    for ri, row in enumerate(clean):
+        if ri in blank or not row[pci]:
+            continue
+        d = names.setdefault(row[pci], {"prices": [], "cats": Counter(), "rows": []})
+        d["rows"].append(ri)
+        try:
+            d["prices"].append(float(row[prci]))
+        except (TypeError, ValueError):
+            pass
+        if cat_h and row[col_idx[cat_h]]:
+            d["cats"][row[col_idx[cat_h]]] += 1
+
+    def summary(d):
+        return (statistics.median(d["prices"]) if d["prices"] else None,
+                d["cats"].most_common(1)[0][0] if d["cats"] else None)
+
+    english = {nm: summary(d) for nm, d in names.items() if not is_arabic(nm)}
+    if not english:
+        return
+    arabic = {nm: summary(d) for nm, d in names.items() if is_arabic(nm)}
+    for p in ctx.products:  # the catalog's Arabic names count too, at their saved price
+        if is_arabic(p["name"]) and p.get("price") and p["name"] not in arabic:
+            arabic[p["name"]] = (float(p["price"]), None)
+    for en, (ar, sc) in B.pair(english, arabic).items():
+        for ri in names[en]["rows"]:
+            record(ri, pci, ar, "product_match", sc, group=f"{prod_h}::{ar}")
+        clusters.append({"column": prod_h, "field": "product", "canonical": ar,
+                         "variants": [{"value": ar, "count": len(names.get(ar, {}).get("rows", []))},
+                                      {"value": en, "count": len(names[en]["rows"])}],
+                         "rows": len(names.get(ar, {}).get("rows", [])) + len(names[en]["rows"])})
 
 
 def _valid(kind: str, v: str, cleaned: bool) -> bool:

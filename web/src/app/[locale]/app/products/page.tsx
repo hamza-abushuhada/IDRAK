@@ -59,7 +59,9 @@ function Products() {
     },
     { key: "category", label: tx("Category", "الفئة"), render: (p) => <span className="whitespace-nowrap text-ink-2">{name(p.category, p.category_ar)}</span> },
     {
-      key: "stock", label: tx("Stock", "المخزون"), align: "end", render: (p) => (
+      key: "stock", label: tx("Stock", "المخزون"), align: "end", render: (p) => p.stock_known === false ? (
+        <span className="text-ink-3">—<span className="block text-[11px]">{tx("not tracked", "ما في جرد")}</span></span>
+      ) : (
         <span className={productFlags(p).lowStock ? "font-medium text-danger" : ""}><N v={p.stock} /><span className="num block text-[11px] text-ink-3">{tx("reorder at", "اطلب عند")} {num(p.reorder_level)}</span></span>
       ),
     },
@@ -67,7 +69,13 @@ function Products() {
     { key: "revenue30", label: tx("Revenue 30d", "إيراد 30 يوم"), align: "end", render: (p) => <Money v={p.revenue30} /> },
     { key: "price", label: tx("Price / cost", "السعر / الكلفة"), align: "end", render: (p) => <span className="whitespace-nowrap"><Money v={p.price} /><span className="block text-[11.5px] text-ink-3"><Money v={p.cost} /></span></span> },
     {
-      key: "margin", label: tx("Margin", "الهامش"), align: "end", render: (p) => (
+      key: "margin", label: tx("Margin", "الهامش"), align: "end", render: (p) => productFlags(p).suspectCost ? (
+        <span className="whitespace-nowrap text-[12px] font-medium text-[#8a5d0e]"
+          title={tx("The cost is far above the price: usually fils read as dinars, or a carton cost on one unit.",
+                    "الكلفة أعلى بكثير من السعر: غالباً فلس انقرأ دينار، أو كلفة كرتونة على حبة وحدة.")}>
+          {tx("Check cost", "راجع الكلفة")}
+        </span>
+      ) : (
         <span className={`num ${p.margin === null ? "text-ink-3" : p.margin < 0 ? "font-medium text-danger" : p.margin < 10 ? "text-[#8a5d0e]" : "text-olive"}`}>{p.margin === null ? "—" : `${p.margin}%`}</span>
       ),
     },
@@ -77,7 +85,8 @@ function Products() {
         const f = productFlags(p);
         return (
           <div className="flex flex-wrap gap-1">
-            {f.belowCost && <Badge tone="danger">{tx("Below cost", "تحت الكلفة")}</Badge>}
+            {f.suspectCost ? <Badge tone="saffron">{tx("Check cost", "راجع الكلفة")}</Badge>
+              : f.belowCost && <Badge tone="danger">{tx("Below cost", "تحت الكلفة")}</Badge>}
             {f.lowStock && <Badge tone="terra">{tx("Low", "قليل")}</Badge>}
             {f.dead && <Badge tone="neutral">{tx("Not moving", "واقف")}</Badge>}
             {f.expiring && <Badge tone="saffron">{f.expDays !== null && f.expDays < 0 ? tx("Expired", "منتهي") : tx(`${f.expDays}d left`, `باقي ${f.expDays} يوم`)}</Badge>}

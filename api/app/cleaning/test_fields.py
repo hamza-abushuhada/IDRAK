@@ -132,6 +132,14 @@ class NoRegressions(unittest.TestCase):
     def test_customer_list(self):
         self.assertEqual(entity_of(["الاسم", "رقم الهاتف", "المدينة"]), "customers")
 
+    def test_menu_with_supplier_and_unit_is_still_a_product_list(self):
+        # The live account's menu: "وحدة القياس" mapped to pack_size and "المورد الافتراضي"
+        # to supplier made it "supplier prices", losing its selling prices and stock.
+        fields = {"sku", "product", "pack_size", "category", "cost", "unit_price", "stock", "minimum_stock",
+                  "supplier", "expiry_date", "notes"}
+        self.assertEqual(detect_entity(fields), "products")
+        self.assertEqual(detect_entity({"supplier", "product", "carton_price", "pack_size"}), "supplier_prices")
+
     def test_detect_entity_without_headers_is_unchanged(self):
         self.assertEqual(detect_entity({"product", "quantity", "date"}), "sales")
         self.assertEqual(detect_entity({"supplier", "product", "carton_price"}), "supplier_prices")

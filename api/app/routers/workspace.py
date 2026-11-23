@@ -63,7 +63,7 @@ async def products(q: str | None = None, category_id: str | None = None, filter:
              ex as (select product_id, min(expiry_date) next_expiry from inventory_batches where org_id=$1 and quantity > 0 group by 1)
         select p.id, p.sku, p.barcode, p.name, p.name_ar, p.brand, p.size, p.cost, p.price, p.tax_rate, p.reorder_level, p.is_perishable, p.is_active,
                c.id category_id, c.name category, c.name_ar category_ar, su.name supplier, su.name_ar supplier_ar,
-               coalesce(st.stock,0) stock, coalesce(sold.q30,0) sold30, coalesce(sold.rev30,0) revenue30, coalesce(sold.gp30,0) profit30, ex.next_expiry,
+               coalesce(st.stock,0) stock, st.product_id is not null stock_known, coalesce(sold.q30,0) sold30, coalesce(sold.rev30,0) revenue30, coalesce(sold.gp30,0) profit30, ex.next_expiry,
                case when p.price > 0 then round((p.price - p.cost)/p.price*100, 1) end margin
         from products p left join categories c on c.id=p.category_id left join suppliers su on su.id=p.supplier_id
         left join sold on sold.product_id=p.id left join st on st.product_id=p.id left join ex on ex.product_id=p.id
@@ -73,10 +73,13 @@ async def products(q: str | None = None, category_id: str | None = None, filter:
         rows = [r for r in rows if ql in (r["name"] or "").lower() or ql in (r["name_ar"] or "") or ql in (r["sku"] or "").lower() or ql in (r["barcode"] or "")]
     if category_id:
         rows = [r for r in rows if r["category_id"] == category_id]
+    # Same rules as web/src/components/workspace/products.ts (productFlags).
     if filter == "below_cost":
-        rows = [r for r in rows if r["cost"] > r["price"]]
+        # A product with no selling price (a raw material, an ingredient) isn't sold below cost.
+        rows = [r for r in rows if r["price"] > 0 and r["cost"] > r["price"]]
     elif filter == "low_stock":
-        rows = [r for r in rows if r["stock"] <= r["reorder_level"]]
+        # No stock record at all means stock isn't tracked, not that it's out.
+        rows = [r for r in rows if r["stock_known"] and r["stock"] <= r["reorder_level"]]
     elif filter == "dead":
         rows = [r for r in rows if r["stock"] > 0 and r["sold30"] <= 0.5]
     elif filter == "expiring":

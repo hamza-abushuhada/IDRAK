@@ -14,8 +14,8 @@ from .. import db
 from ..auth import Ctx, require
 from ..cleaning import engine
 from ..cleaning import parsers as cleaning_parsers
-from ..cleaning.arabic import match_key
-from ..cleaning.context import load_context
+from ..cleaning.arabic import match_key, place_key
+from ..cleaning.context import KIND_ALIAS, load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
                                entity_state, field_signature, kind_of)
@@ -156,6 +156,12 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
                           "select match_value, replace_value from cleaning_rules"
                           " where org_id=$1 and column_kind='column'", ctx.org_id)}
         explicit_unused = set()
+        used_rules = [h for h in headers if h in remembered]
+        if used_rules:
+            # The "applied" counter on the data page; it only moved when a rule was re-learned.
+            await db.execute("update cleaning_rules set times_applied = times_applied + 1"
+                             " where org_id=$1 and column_kind='column' and match_value = any($2::text[])",
+                             ctx.org_id, used_rules)
         for h in headers:
             if h not in remembered:
                 continue
@@ -795,7 +801,13 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     continue
         skipped.append({"row": row_index, "reason": reason, "reason_ar": reason_ar, "data": snapshot})
     async with db.transaction() as c:
-        branches = {match_key(b["name"]): b["id"] for b in await c.fetch("select id,name from branches where org_id=$1", ctx.org_id)}
+        # Keyed by place, so "فرع خلدا" in this file finds the existing "Khalda" branch
+        # instead of creating a second one (cleaning/arabic.py: place_key).
+        branches: dict[str, str] = {}
+        for b in await c.fetch("select id,name,name_ar from branches where org_id=$1 order by created_at", ctx.org_id):
+            for nm in (b["name"], b["name_ar"]):
+                if nm:
+                    branches.setdefault(place_key(nm), b["id"])
         emps = {match_key(e["full_name"]): e["id"] for e in await c.fetch("select id, full_name from employees where org_id=$1", ctx.org_id)}
         product_rows = [dict(p) for p in await c.fetch("select id,name,cost,price,barcode,sku,category_id from products where org_id=$1", ctx.org_id)]
         names: dict[str, list[dict]] = defaultdict(list)
@@ -866,7 +878,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             الإنشاء هنا يحفظ الاسم كما ورد في الملف، والتنظيف يوحّد
             الأشكال المختلفة قبل الوصول لهنا.
             """
-            k = match_key(name)
+            k = place_key(name)
             if k in branches:
                 return branches[k]
             bid = await c.fetchval(
@@ -1084,7 +1096,46 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     custs[phone] = cid
                 stats["customers"] += 1
         elif entity in ("products", "supplier_prices"):
-            old_costs = []
+            old_costs, old_prices = [], []
+            main_branch: list = []  # cached on first use
+
+            async def save_stock(r, pid):
+                """A product list's stock, reorder level and expiry (menu / inventory exports).
+
+                These columns were mapped but never written, so every product showed 0 in stock.
+                """
+                reorder = _num(g(r, "minimum_stock"))
+                if reorder is not None and 0 <= reorder < 1_000_000:
+                    await c.execute("update products set reorder_level=$2 where id=$1 and org_id=$3",
+                                    pid, int(round(reorder)), ctx.org_id)
+                qty = _num(g(r, "stock"))
+                if qty is None or qty < 0:
+                    return
+                bname = g(r, "branch")
+                if bname:
+                    bid = await branch_id(bname)
+                else:
+                    if not main_branch:
+                        main_branch.append(await c.fetchval(
+                            "select id from branches where org_id=$1 order by created_at limit 1", ctx.org_id))
+                    bid = main_branch[0]
+                if not bid:
+                    return
+                await c.execute("""insert into inventory_levels(org_id,branch_id,product_id,quantity) values($1,$2,$3,$4)
+                                   on conflict (branch_id,product_id) do update set quantity=excluded.quantity, updated_at=now()""",
+                                ctx.org_id, bid, pid, qty)
+                stats["stock_levels"] = stats.get("stock_levels", 0) + 1
+                exp = g(r, "expiry_date")
+                if exp and qty > 0:
+                    try:
+                        day = dt.date.fromisoformat(exp[:10])
+                    except ValueError:
+                        return
+                    await c.execute("delete from inventory_batches where org_id=$1 and branch_id=$2 and product_id=$3 and expiry_date=$4",
+                                    ctx.org_id, bid, pid, day)
+                    await c.execute("""insert into inventory_batches(org_id,branch_id,product_id,quantity,expiry_date,received_at)
+                                       values($1,$2,$3,$4,$5,current_date)""", ctx.org_id, bid, pid, qty, day)
+
             for ri, r in enumerate(rows):
                 name = g(r, "product")
                 if not name:
@@ -1095,19 +1146,32 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     cost, price = (cost if cost is not None else price), None
                 existing = find_product(name, g(r, "barcode"))
                 if existing:
+                    pid = existing["id"]
                     if cost:
-                        old_costs.append((str(existing["id"]), float(existing["cost"])))
-                        await c.execute("update products set cost=$2 where id=$1", existing["id"], cost)
+                        old_costs.append((str(pid), float(existing["cost"])))
+                        await c.execute("update products set cost=$2 where id=$1", pid, cost)
                         stats["products_updated"] += 1
+                    # A product list (menu, catalog) is where selling prices come from: a
+                    # price saved wrong by an earlier file (fils as dinars) gets corrected.
+                    if entity == "products" and price and abs(price - float(existing["price"] or 0)) > 0.0005:
+                        old_prices.append((str(pid), float(existing["price"] or 0)))
+                        await c.execute("update products set price=$2 where id=$1", pid, price)
+                        existing["price"] = price
                 else:
                     try:
-                        await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
+                        pid, _ = await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
                     except SkippedRow as exc:
                         _skip(ri, r, exc.reason, exc.reason_ar)
                         continue
+                if entity == "products":
+                    await save_stock(r, pid)
             stats["old_costs"] = old_costs
+            stats["old_prices"] = old_prices
         learned = 0
-        pairs = {(ch["column_name"], ch["old_value"], ch["new_value"]) for ch in changes if ch["rule"] in MERGE_RULES and ch["status"] != "rejected"}
+        # Only merges the user approved become memory. Learning every merge that
+        # wasn't rejected saved Idrak's own unreviewed guesses (a garlic sack →
+        # "Mixed Grill 1kg") as rules that then rewrote every later file.
+        pairs = {(ch["column_name"], ch["old_value"], ch["new_value"]) for ch in changes if ch["rule"] in MERGE_RULES and ch["status"] == "approved"}
         rule_recs = []
         for col, old, new in list(pairs)[:150]:
             kind = kind_of((run["mapping"].get(col) or {}).get("field"))
@@ -1117,13 +1181,24 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         if rule_recs:
             await c.executemany("""insert into cleaning_rules(org_id,column_kind,match_value,replace_value,created_by) values($1,$2,$3,$4,$5)
                                    on conflict (org_id,column_kind,match_value) do update set times_applied = cleaning_rules.times_applied + 1""", rule_recs)
+        # Memory rules that rewrote values in this file: +1 each (the data page's
+        # "applied" counter, which only moved when a rule was re-learned).
+        hit = {(kind_of((run["mapping"].get(ch["column_name"]) or {}).get("field")), match_key(ch["old_value"]))
+               for ch in changes if ch["rule"] == "memory" and ch["status"] != "rejected" and ch["old_value"]}
+        if hit:
+            rule_ids = {(KIND_ALIAS.get(rr["column_kind"], rr["column_kind"]), match_key(rr["match_value"])): rr["id"]
+                        for rr in await c.fetch("select id, column_kind, match_value from cleaning_rules"
+                                                " where org_id=$1 and column_kind<>'column'", ctx.org_id)}
+            bumps = [(rule_ids[k],) for k in hit if k in rule_ids]
+            if bumps:
+                await c.executemany("update cleaning_rules set times_applied = times_applied + 1 where id=$1", bumps)
         await c.execute("update cleaning_changes set status='approved' where run_id=$1 and status='proposed'", run_id)
         imported = stats["sales"] or stats["customers"] or (stats["products_created"] + stats["products_updated"])
         # نُخزّن الصفوف المتخطّاة في stats حتى يقدر المستخدم ينزّلها كـ CSV.
         # قد تكون كبيرة، فنقصّها على 500 سبب مع عدّاد كلّي.
         skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
-                        run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
+                        run_id, {"import": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned, "old_costs": stats.get("old_costs", []), "old_prices": stats.get("old_prices", []),
                                  "skipped": skipped_blob, "branches_created": branches_created,
                                  "employees_created": employees_created, "categories_created": categories_created,
                                  "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
@@ -1131,10 +1206,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
-                                                                                           **{k: v for k, v in stats.items() if k != "old_costs"}})
+                                                                                           **{k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}})
     await db.execute("insert into notifications(org_id,kind,title,link) values($1,'cleaning',$2,$3)", ctx.org_id,
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
-    return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned,
+    return {"ok": True, "imported": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned,
             "skipped": {"count": len(skipped), "sample": skipped[:20]},
             "branches_created": branches_created,
             "employees_created": employees_created,
@@ -1153,6 +1228,8 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         n2 = await c.execute("delete from customers where upload_id=$1 and org_id=$2", run["upload_id"], ctx.org_id)
         for pid, cost in (run["stats"] or {}).get("old_costs", []):
             await c.execute("update products set cost=$2 where id=$1 and org_id=$3", pid, cost, ctx.org_id)
+        for pid, price in (run["stats"] or {}).get("old_prices", []):
+            await c.execute("update products set price=$2 where id=$1 and org_id=$3", pid, price, ctx.org_id)
         await c.execute("delete from products p where p.upload_id=$1 and p.org_id=$2 and not exists (select 1 from sale_items si where si.product_id=p.id)", run["upload_id"], ctx.org_id)
         await c.execute("update cleaning_runs set status='reverted', reverted_at=now() where id=$1", run_id)
         await c.execute("update uploads set status='cleaned', imported_rows=0 where id=$1", run["upload_id"])
