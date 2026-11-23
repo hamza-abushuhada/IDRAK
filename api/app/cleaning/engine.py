@@ -202,7 +202,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
     ctx = ctx or Context()
     today = today or dt.date.today()
     fields = {h: mapping.get(h) for h in headers}
-    entity = detect_entity({f for f in fields.values() if f})
+    entity = detect_entity({f for f in fields.values() if f}, headers)
     col_idx = {h: i for i, h in enumerate(headers)}
     n = len(rows)
     raw = [[_s(r[i]) if i < len(r) else "" for i in range(len(headers))] for r in rows]
