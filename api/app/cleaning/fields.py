@@ -205,10 +205,12 @@ def _detect(fields: set[str], tokens: set[str], guards: bool = True) -> tuple[st
 def _detect_by_fields(fields: set[str]) -> str:
     if {"product", "quantity"} <= fields and ({"date", "invoice_number"} & fields):
         return "sales"
-    if "supplier" in fields and ({"carton_price", "pack_size"} & fields):
-        return "supplier_prices"
+    # Stock first: a menu or inventory list names a default supplier and a unit of
+    # measure too, and read as supplier prices it lost its selling prices and stock.
     if "product" in fields and ({"stock", "minimum_stock"} & fields):
         return "products"
+    if "supplier" in fields and ({"carton_price", "pack_size"} & fields):
+        return "supplier_prices"
     if "supplier" in fields and "cost" in fields and "stock" not in fields:
         return "supplier_prices"
     if "product" in fields and ({"unit_price", "cost", "stock", "barcode"} & fields):

@@ -1090,7 +1090,46 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     custs[phone] = cid
                 stats["customers"] += 1
         elif entity in ("products", "supplier_prices"):
-            old_costs = []
+            old_costs, old_prices = [], []
+            main_branch: list = []  # cached on first use
+
+            async def save_stock(r, pid):
+                """A product list's stock, reorder level and expiry (menu / inventory exports).
+
+                These columns were mapped but never written, so every product showed 0 in stock.
+                """
+                reorder = _num(g(r, "minimum_stock"))
+                if reorder is not None and 0 <= reorder < 1_000_000:
+                    await c.execute("update products set reorder_level=$2 where id=$1 and org_id=$3",
+                                    pid, int(round(reorder)), ctx.org_id)
+                qty = _num(g(r, "stock"))
+                if qty is None or qty < 0:
+                    return
+                bname = g(r, "branch")
+                if bname:
+                    bid = await branch_id(bname)
+                else:
+                    if not main_branch:
+                        main_branch.append(await c.fetchval(
+                            "select id from branches where org_id=$1 order by created_at limit 1", ctx.org_id))
+                    bid = main_branch[0]
+                if not bid:
+                    return
+                await c.execute("""insert into inventory_levels(org_id,branch_id,product_id,quantity) values($1,$2,$3,$4)
+                                   on conflict (branch_id,product_id) do update set quantity=excluded.quantity, updated_at=now()""",
+                                ctx.org_id, bid, pid, qty)
+                stats["stock_levels"] = stats.get("stock_levels", 0) + 1
+                exp = g(r, "expiry_date")
+                if exp and qty > 0:
+                    try:
+                        day = dt.date.fromisoformat(exp[:10])
+                    except ValueError:
+                        return
+                    await c.execute("delete from inventory_batches where org_id=$1 and branch_id=$2 and product_id=$3 and expiry_date=$4",
+                                    ctx.org_id, bid, pid, day)
+                    await c.execute("""insert into inventory_batches(org_id,branch_id,product_id,quantity,expiry_date,received_at)
+                                       values($1,$2,$3,$4,$5,current_date)""", ctx.org_id, bid, pid, qty, day)
+
             for ri, r in enumerate(rows):
                 name = g(r, "product")
                 if not name:
@@ -1101,17 +1140,27 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     cost, price = (cost if cost is not None else price), None
                 existing = find_product(name, g(r, "barcode"))
                 if existing:
+                    pid = existing["id"]
                     if cost:
-                        old_costs.append((str(existing["id"]), float(existing["cost"])))
-                        await c.execute("update products set cost=$2 where id=$1", existing["id"], cost)
+                        old_costs.append((str(pid), float(existing["cost"])))
+                        await c.execute("update products set cost=$2 where id=$1", pid, cost)
                         stats["products_updated"] += 1
+                    # A product list (menu, catalog) is where selling prices come from: a
+                    # price saved wrong by an earlier file (fils as dinars) gets corrected.
+                    if entity == "products" and price and abs(price - float(existing["price"] or 0)) > 0.0005:
+                        old_prices.append((str(pid), float(existing["price"] or 0)))
+                        await c.execute("update products set price=$2 where id=$1", pid, price)
+                        existing["price"] = price
                 else:
                     try:
-                        await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
+                        pid, _ = await product_id(name, price or 0, cost, g(r, "barcode"), g(r, "sku"))
                     except SkippedRow as exc:
                         _skip(ri, r, exc.reason, exc.reason_ar)
                         continue
+                if entity == "products":
+                    await save_stock(r, pid)
             stats["old_costs"] = old_costs
+            stats["old_prices"] = old_prices
         learned = 0
         # Only merges the user approved become memory. Learning every merge that
         # wasn't rejected saved Idrak's own unreviewed guesses (a garlic sack →
@@ -1132,7 +1181,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         # قد تكون كبيرة، فنقصّها على 500 سبب مع عدّاد كلّي.
         skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
-                        run_id, {"import": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned, "old_costs": stats.get("old_costs", []),
+                        run_id, {"import": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned, "old_costs": stats.get("old_costs", []), "old_prices": stats.get("old_prices", []),
                                  "skipped": skipped_blob, "branches_created": branches_created,
                                  "employees_created": employees_created, "categories_created": categories_created,
                                  "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
@@ -1140,10 +1189,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
-                                                                                           **{k: v for k, v in stats.items() if k != "old_costs"}})
+                                                                                           **{k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}})
     await db.execute("insert into notifications(org_id,kind,title,link) values($1,'cleaning',$2,$3)", ctx.org_id,
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
-    return {"ok": True, "imported": {k: v for k, v in stats.items() if k != "old_costs"}, "learned_rules": learned,
+    return {"ok": True, "imported": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned,
             "skipped": {"count": len(skipped), "sample": skipped[:20]},
             "branches_created": branches_created,
             "employees_created": employees_created,
@@ -1162,6 +1211,8 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         n2 = await c.execute("delete from customers where upload_id=$1 and org_id=$2", run["upload_id"], ctx.org_id)
         for pid, cost in (run["stats"] or {}).get("old_costs", []):
             await c.execute("update products set cost=$2 where id=$1 and org_id=$3", pid, cost, ctx.org_id)
+        for pid, price in (run["stats"] or {}).get("old_prices", []):
+            await c.execute("update products set price=$2 where id=$1 and org_id=$3", pid, price, ctx.org_id)
         await c.execute("delete from products p where p.upload_id=$1 and p.org_id=$2 and not exists (select 1 from sale_items si where si.product_id=p.id)", run["upload_id"], ctx.org_id)
         await c.execute("update cleaning_runs set status='reverted', reverted_at=now() where id=$1", run_id)
         await c.execute("update uploads set status='cleaned', imported_rows=0 where id=$1", run["upload_id"])
