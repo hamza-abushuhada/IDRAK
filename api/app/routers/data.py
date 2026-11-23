@@ -15,7 +15,7 @@ from ..auth import Ctx, require
 from ..cleaning import engine
 from ..cleaning import parsers as cleaning_parsers
 from ..cleaning.arabic import match_key, place_key
-from ..cleaning.context import load_context
+from ..cleaning.context import KIND_ALIAS, load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
                                entity_state, field_signature, kind_of)
@@ -156,6 +156,12 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
                           "select match_value, replace_value from cleaning_rules"
                           " where org_id=$1 and column_kind='column'", ctx.org_id)}
         explicit_unused = set()
+        used_rules = [h for h in headers if h in remembered]
+        if used_rules:
+            # The "applied" counter on the data page; it only moved when a rule was re-learned.
+            await db.execute("update cleaning_rules set times_applied = times_applied + 1"
+                             " where org_id=$1 and column_kind='column' and match_value = any($2::text[])",
+                             ctx.org_id, used_rules)
         for h in headers:
             if h not in remembered:
                 continue
@@ -1175,6 +1181,17 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         if rule_recs:
             await c.executemany("""insert into cleaning_rules(org_id,column_kind,match_value,replace_value,created_by) values($1,$2,$3,$4,$5)
                                    on conflict (org_id,column_kind,match_value) do update set times_applied = cleaning_rules.times_applied + 1""", rule_recs)
+        # Memory rules that rewrote values in this file: +1 each (the data page's
+        # "applied" counter, which only moved when a rule was re-learned).
+        hit = {(kind_of((run["mapping"].get(ch["column_name"]) or {}).get("field")), match_key(ch["old_value"]))
+               for ch in changes if ch["rule"] == "memory" and ch["status"] != "rejected" and ch["old_value"]}
+        if hit:
+            rule_ids = {(KIND_ALIAS.get(rr["column_kind"], rr["column_kind"]), match_key(rr["match_value"])): rr["id"]
+                        for rr in await c.fetch("select id, column_kind, match_value from cleaning_rules"
+                                                " where org_id=$1 and column_kind<>'column'", ctx.org_id)}
+            bumps = [(rule_ids[k],) for k in hit if k in rule_ids]
+            if bumps:
+                await c.executemany("update cleaning_rules set times_applied = times_applied + 1 where id=$1", bumps)
         await c.execute("update cleaning_changes set status='approved' where run_id=$1 and status='proposed'", run_id)
         imported = stats["sales"] or stats["customers"] or (stats["products_created"] + stats["products_updated"])
         # نُخزّن الصفوف المتخطّاة في stats حتى يقدر المستخدم ينزّلها كـ CSV.
