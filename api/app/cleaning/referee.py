@@ -13,8 +13,10 @@ Its answer can break a tie, but it never overrules a witness that is sure:
     reason) for the mapping screen. The review clears only when the AI agrees at
     >= TRUST_AT and the value evidence is not a mismatch.
   * Columns that are sure are never sent and their fields are off limits: an
-    exact header match the values agree with, the company's saved mapping (and
-    its "don't use"), the user's own choice.
+    exact header match or a shared synonym (learning.py) the values agree with,
+    the company's saved mapping (and its "don't use"), the user's own choice.
+    A column remembered from the company's last file is sure only while its
+    values still fit; if they changed it is under review and is sent.
   * Fails open: no answer, a timeout, an error or a malformed answer leaves the
     mapping and its review flags exactly as they were.
 
@@ -39,11 +41,16 @@ Ask = Callable[[dict, dict], Awaitable[dict | None]]
 
 
 def candidates(headers: list[str], mapping: dict[str, dict], skip: set[str] | frozenset = frozenset()) -> list[str]:
-    """Columns to send: empty or under review, except the company's saved or the user's own choices."""
+    """Columns to send: empty or under review, except the company's saved or the user's own choices.
+
+    A saved choice is sure only while its values agree: a column remembered
+    from the company's last file whose values changed is under review, so it
+    is sent (its field still never moves; see apply_verdicts).
+    """
     out = []
     for h in headers:
         m = mapping.get(h) or {}
-        if h in skip or m.get("source") in ("memory", "user"):
+        if h in skip or (m.get("source") in ("memory", "user") and not m.get("review")):
             continue
         if not m.get("field") or m.get("review"):
             out.append(h)

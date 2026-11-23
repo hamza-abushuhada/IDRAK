@@ -1,5 +1,6 @@
 from functools import lru_cache
 import datetime as dt
+import logging
 import re
 import uuid
 from collections import defaultdict
@@ -15,13 +16,14 @@ from ..cleaning import engine
 from ..cleaning import parsers as cleaning_parsers
 from ..cleaning.arabic import match_key
 from ..cleaning.context import load_context
-from ..cleaning import referee
-from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map, detect_entity,
+from ..cleaning import learning, referee
+from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
                                entity_state, field_signature, kind_of)
 from ..cleaning.io import read_table
 from ..services import ai
 
 router = APIRouter(prefix="/data", tags=["data"])
+log = logging.getLogger(__name__)
 MERGE_RULES = {"product_match", "person_match", "branch_map", "value_merge", "payment_map", "city_map"}
 
 
@@ -48,6 +50,78 @@ async def _ai_referee(ctx: Ctx, headers: list[str], rows: list[list], mapping: d
         await ai.budget_release(ctx.org_id)
 
 
+# ── Phase 3: what companies confirmed (cleaning/learning.py). Every DB step
+# here fails open: on any error the mapping works exactly as it did before. ──
+
+_SHARED_TTL = 600  # seconds; a newly promoted header reaches uploads within 10 minutes
+# Counts only, never which org voted: header, field, how many orgs and users
+# chose it, and how many orgs voted on the header at all. Demo orgs don't count.
+_SHARED_SQL = """select header_key, field, orgs, voters, total from (
+                   select v.header_key, v.field, count(*) orgs, count(distinct v.voted_by) voters,
+                          sum(count(*)) over (partition by v.header_key) total
+                     from mapping_votes v join organizations o on o.id = v.org_id
+                    where not o.is_demo
+                    group by v.header_key, v.field) t
+                  where orgs >= $1"""
+
+
+async def _shared_synonyms() -> dict[str, str]:
+    """header_key -> field that enough companies agree on; cached, {} on any error."""
+    hit = db.cache_get(("shared_synonyms",), _SHARED_TTL)
+    if hit is not None:
+        return hit
+    try:
+        shared = learning.promote(await db.fetch(_SHARED_SQL, learning.MIN_ORGS))
+    except Exception:
+        log.warning("shared synonyms unavailable", exc_info=True)
+        shared = {}  # cached too, so a missing table isn't queried on every upload
+    return db.cache_set(("shared_synonyms",), shared)
+
+
+async def _record_votes(ctx: Ctx, votes: list[tuple[str, str]]) -> None:
+    """One vote per org per header (an org changing its mind replaces its vote)."""
+    if not votes:
+        return
+    try:
+        async with db.transaction() as c:
+            await c.executemany("""insert into mapping_votes(org_id,header_key,field,voted_by) values($1,$2,$3,$4)
+                                   on conflict (org_id,header_key) do update
+                                   set field=excluded.field, voted_by=excluded.voted_by, updated_at=now()""",
+                                [(ctx.org_id, k, f, ctx.user.id) for k, f in votes])
+    except Exception:
+        log.warning("mapping votes not saved", exc_info=True)
+
+
+async def _load_file_memory(org_id: str, headers: list[str]) -> dict | None:
+    fp = learning.fingerprint(headers)
+    if fp is None:
+        return None
+    try:
+        return await db.fetchrow("select columns, entity, signature, confirmed_by from mapping_fingerprints"
+                                 " where org_id=$1 and fingerprint=$2", org_id, fp)
+    except Exception:
+        log.warning("file memory unavailable", exc_info=True)
+        return None
+
+
+async def _remember_file(ctx: Ctx, headers: list[str], rows: list[list], mapping: dict, state: dict) -> None:
+    """Save this file's confirmed mapping and type under its fingerprint (cleaning/learning.py)."""
+    try:
+        rec = learning.file_memory(headers, rows, mapping, state)
+        if rec is None:
+            return
+        fp, saved = rec
+        await db.execute("""insert into mapping_fingerprints(org_id,fingerprint,columns,entity,signature,confirmed_by)
+                            values($1,$2,$3,$4,$5,$6)
+                            on conflict (org_id,fingerprint) do update
+                            set columns=excluded.columns, entity=excluded.entity, signature=excluded.signature,
+                                confirmed_by=excluded.confirmed_by, updated_at=now()""",
+                         ctx.org_id, fp, saved["columns"], saved["entity"], saved["signature"],
+                         ctx.user.id if saved["entity"] else None)
+    except Exception:
+        log.warning("file memory not saved", exc_info=True)
+
+
 _BLOCKED = ("Confirm the file type first: Idrak isn't sure what this file is "
             "(sales, customers, products, supplier prices or a generic table). "
             "Choose it on the column mapping step, then clean again.")
@@ -62,39 +136,52 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
         raise HTTPException(422, "No header row found")
     if ENTITY_KEY in headers:
         raise HTTPException(422, f"A column can't be named {ENTITY_KEY}")
-    # نمرّر الصفوف: الربط يعتمد على اسم العمود وعلى شكل قيمه معاً، والأعمدة
-    # الضعيفة تُعلَّم "review" فيطلب منها الواجهة تأكيداً قبل التنظيف.
-    mapping = auto_map(headers, rows)
-    # ربط الأعمدة اللي عدّله المستخدم قبل تنحفظ كقواعد، فملف الشهر الجاي
-    # من نفس نظام الكاشير بينربط لحاله. القيمة الفاضية = "لا تستخدم"
-    # صراحةً، فما نخلّي الذكاء الاصطناعي يرجّعها.
-    remembered = {r["match_value"]: (r["replace_value"] or "")
-                  for r in await db.fetch(
-                      "select match_value, replace_value from cleaning_rules"
-                      " where org_id=$1 and column_kind='column'", ctx.org_id)}
-    explicit_unused: set[str] = set()
-    for h in headers:
-        if h not in remembered:
-            continue
-        want = remembered[h]
-        if want == "":
-            mapping[h] = {"field": None, "confidence": 1.0, "source": "memory"}
-            explicit_unused.add(h)
-        elif want in FIELDS:
-            mapping[h] = {"field": want, "confidence": 1.0, "source": "memory"}
-    seen_fields: set[str] = set()
-    for h in headers:
-        f = mapping[h]["field"]
-        if f and f in seen_fields:
-            mapping[h] = {"field": None, "confidence": 0.0, "source": None}
-        elif f:
-            seen_fields.add(f)
+    # بصمة الملف: نفس أعمدة ملف نظّفته الشركة قبل؟ ربطه المؤكَّد بيرجع فوراً
+    # (source=memory, via=file) بلا ذكاء اصطناعي، والقيم بتنفحص: عمود تغيّرت
+    # قيمه عن آخر مرة بيرجع أصفر للمراجعة.
+    saved = await _load_file_memory(ctx.org_id, headers)
+    from_file = learning.apply_file_memory(headers, rows, saved) if saved else None
+    if from_file:
+        mapping, explicit_unused = from_file
+    else:
+        # نمرّر الصفوف: الربط يعتمد على اسم العمود وعلى شكل قيمه معاً، والأعمدة
+        # الضعيفة تُعلَّم "review" فيطلب منها الواجهة تأكيداً قبل التنظيف.
+        # والأسماء اللي أكّدتها ≥3 شركات (مرادفات مشتركة) بتنقرأ قبل التقريبية.
+        mapping = auto_map(headers, rows, shared=await _shared_synonyms())
+        # ربط الأعمدة اللي عدّله المستخدم قبل تنحفظ كقواعد، فملف الشهر الجاي
+        # من نفس نظام الكاشير بينربط لحاله. القيمة الفاضية = "لا تستخدم"
+        # صراحةً، فما نخلّي الذكاء الاصطناعي يرجّعها.
+        remembered = {r["match_value"]: (r["replace_value"] or "")
+                      for r in await db.fetch(
+                          "select match_value, replace_value from cleaning_rules"
+                          " where org_id=$1 and column_kind='column'", ctx.org_id)}
+        explicit_unused = set()
+        for h in headers:
+            if h not in remembered:
+                continue
+            want = remembered[h]
+            if want == "":
+                mapping[h] = {"field": None, "confidence": 1.0, "source": "memory"}
+                explicit_unused.add(h)
+            elif want in FIELDS:
+                mapping[h] = {"field": want, "confidence": 1.0, "source": "memory"}
+        seen_fields: set[str] = set()
+        for h in headers:
+            f = mapping[h]["field"]
+            if f and f in seen_fields:
+                mapping[h] = {"field": None, "confidence": 0.0, "source": None}
+            elif f:
+                seen_fields.add(f)
     # الذكاء الاصطناعي حَكَم: يُسأل عن الأعمدة الفاضية والمعلّمة "review"
     # فقط، وما بيغيّر عموداً متأكدين منه (cleaning/referee.py). بياخد ثواني
     # وأحياناً يعلّق والرفع كله واقف عليه، فمهلته قصيرة؛ تأخّر أو فشل،
     # نكمّل بالربط كما هو وبنفس علامات المراجعة.
     mapping = await _ai_referee(ctx, headers, rows, mapping, explicit_unused)
-    entity = detect_entity({m["field"] for m in mapping.values() if m["field"]}, headers)
+    # نوع الملف المؤكَّد على آخر ملف بنفس الأعمدة بينتقل، بس إذا ولا عمود
+    # رجع للمراجعة وكل عمود محافظ على حقله (نفس قاعدة field_signature).
+    if from_file and (carried := learning.carried_entity(headers, mapping, saved)):
+        mapping[ENTITY_KEY] = carried
+    entity = entity_state(headers, mapping)["entity"]
     uid = await db.fetchval("""insert into uploads(org_id,uploaded_by,batch_id,file_name,file_size,source,entity,sheet_name,row_count,column_count,columns,mapping,status)
                                values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'mapped') returning id""",
                             ctx.org_id, ctx.user.id, batch_id, filename, len(data), source, entity, sheets[0] if sheets else None, len(rows), len(headers), headers, mapping)
@@ -365,6 +452,7 @@ async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("
         raise HTTPException(422, f"Unknown file type: {m.entity}")
     headers = u["columns"] or []
     cur = u["mapping"] or {}
+    before = {h: dict(cur.get(h) or {}) for h in headers}  # as the screen showed it, for the shared votes
     learned = []
     for h, f in m.mapping.items():
         # أعمدة الملف فقط: مفتاح غريب (مثل مفتاح تأكيد النوع) لا يُكتب ولا يُحفظ كقاعدة.
@@ -390,6 +478,9 @@ async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("
     if u.get("batch_id"):
         report = await _build_batch_report(u["batch_id"], ctx.org_id)
         await db.execute("update import_batches set link_report=$2,updated_at=now() where id=$1", u["batch_id"], report)
+    # الأعمدة اللي المستخدم غيّرها أو أكّدها وهي صفراء = صوت لهالشركة على
+    # اسم العمود المطبَّع. ≥3 شركات متفقة → مرادف مشترك للكل (learning.py).
+    await _record_votes(ctx, learning.votes(headers, before, m.mapping))
     return {"ok": True, "entity": entity, "entity_check": state}
 
 
@@ -441,6 +532,8 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
         await c.execute("update uploads set status='cleaned', health_before=$2, health_after=$3, entity=$4 where id=$1",
                         upload_id, res["score_before"]["score"], res["score_after"]["score"], res["entity"])
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.run", "upload", upload_id, {"before": res["score_before"]["score"], "after": res["score_after"]["score"]})
+    # الربط والنوع صاروا مؤكَّدين: نحفظهم تحت بصمة الملف للمرة الجاية.
+    await _remember_file(ctx, headers, d["raw_rows"], u["mapping"] or {}, state)
     return await get_run(str(run_id), ctx)
 
 

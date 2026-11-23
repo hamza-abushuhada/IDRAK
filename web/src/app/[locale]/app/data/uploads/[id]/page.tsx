@@ -3,7 +3,7 @@ import { useParams } from "next/navigation";
 import { useRouter } from "@/lib/router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Check, ScanSearch, Sparkles, Wand2 } from "lucide-react";
+import { AlertTriangle, Check, History, ScanSearch, Sparkles, Users, Wand2 } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
@@ -25,12 +25,16 @@ type EntityReason =
 type EntityCheck = {
   detected: string; entity: string; confirmed: string | null; needs_confirmation: boolean; blocked: boolean;
   reasons: EntityReason[]; suggested: string[];
+  // "file": التأكيد انتقل من آخر ملف للشركة بنفس الأعمدة (api/app/cleaning/learning.py).
+  confirmed_via?: string | null;
 };
 type Upload = {
   id: string; file_name: string; entity: string; row_count: number; column_count: number; columns: string[];
+  // source: rules | shared (اسم أكّدته ≥3 شركات) | values | ai | memory | user.
+  // via "file": الربط رجع من آخر ملف للشركة بنفس الأعمدة (بصمة الملف).
   mapping: Record<string, {
     field: string | null; confidence: number; source: string | null; reason?: string;
-    review?: boolean; evidence?: Evidence | null; ai?: AiVerdict | null;
+    review?: boolean; evidence?: Evidence | null; ai?: AiVerdict | null; via?: string | null;
   }>;
   preview: unknown[][]; fields: { key: string; kind: string; en: string; ar: string }[]; entity_label: [string, string]; last_run_id: string | null;
   entity_check: EntityCheck; entities: Record<string, { en: string; ar: string; needs: string[][] }>;
@@ -215,7 +219,10 @@ export default function MappingPage() {
               {entityPending
                 ? tx(`Idrak thinks this is a ${entityLabel(entity)} file, but isn't sure. Confirm or choose its type before cleaning.`,
                      `إدراك بيتوقع إنه الملف ${entityLabel(entity)}، بس مش متأكد. أكّد نوعه أو اختار غيره قبل التنظيف.`)
-                : tx(`File type: ${entityLabel(entity)} (confirmed)`, `نوع الملف: ${entityLabel(entity)} (مؤكَّد)`)}
+                : check.confirmed_via === "file" && !entityChoice
+                  ? tx(`File type: ${entityLabel(entity)} (confirmed on your last file with these columns)`,
+                       `نوع الملف: ${entityLabel(entity)} (مؤكَّد من ملفك السابق بنفس الأعمدة)`)
+                  : tx(`File type: ${entityLabel(entity)} (confirmed)`, `نوع الملف: ${entityLabel(entity)} (مؤكَّد)`)}
             </p>
             <div className="flex items-center gap-2">
               <Select value={entity} onChange={(e) => setEntityChoice(e.target.value)} className="h-9 text-[13px]"
@@ -280,9 +287,11 @@ export default function MappingPage() {
               const takenBy = (field: string) => Object.entries(mapping).find(([col, f]) => col !== c && f === field)?.[0];
               const options = u.fields.filter((f) => f.key === chosen || !takenBy(f.key));
               const remembered = m?.source === "memory";
+              const fromLastFile = remembered && m?.via === "file";
               const unusedWithData = !chosen && samples.length > 0;
               const isPending = pending.includes(c);
-              const reason = m?.evidence ? why(m.evidence)
+              const reason = m?.evidence
+                ? (fromLastFile && m.evidence.type === "mismatch" ? tx("Changed since your last file · ", "تغيّر عن ملفك السابق · ") : "") + why(m.evidence)
                 : m?.reason || (isPending ? tx("Not sure about this match", "إدراك مش متأكد من هالربط") : null);
               // اقتراح الحَكَم: لا نعرض زر "استخدمه" لحقل مأخوذ بعمود ثاني الآن.
               const ai = m?.ai;
@@ -292,11 +301,13 @@ export default function MappingPage() {
                   <div className="min-w-0">
                     <p className="font-medium text-ink">{c}</p>
                     <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-ink-3">
-                      {remembered ? <Badge tone="olive">{tx("Your saved mapping", "ربطك المحفوظ")}</Badge>
-                        : isPending ? <Badge tone="saffron"><AlertTriangle size={11} />{tx("Check this", "تأكّد")}</Badge>
+                      {isPending ? <Badge tone="saffron"><AlertTriangle size={11} />{tx("Check this", "تأكّد")}</Badge>
+                        : fromLastFile ? <Badge tone="olive"><History size={11} />{tx("Learned from your last file", "من ملفك السابق")}</Badge>
+                        : remembered ? <Badge tone="olive">{tx("Your saved mapping", "ربطك المحفوظ")}</Badge>
                         : confirmed[c] ? <Badge tone="olive"><Check size={11} />{tx("Confirmed", "تم التأكيد")}</Badge>
                         : m?.source === "ai" ? <Badge tone="terra"><Sparkles size={11} />AI · {Math.round((m.confidence || 0) * 100)}%</Badge>
                         : m?.source === "values" ? <Badge tone="olive"><ScanSearch size={11} />{tx("Found from values", "اكتُشف من القيم")}</Badge>
+                        : m?.source === "shared" ? <Badge tone="olive"><Users size={11} />{tx("Common name across Idrak users", "اسم شائع عند مستخدمي إدراك")}</Badge>
                         : m?.field ? <Badge tone="olive">{tx("Recognized", "معروف")}</Badge>
                         : <Badge>{tx("Not used", "غير مستخدم")}</Badge>}
                       {reason && <span className="truncate">{reason}</span>}

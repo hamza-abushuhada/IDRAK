@@ -106,5 +106,18 @@ class TestAdmitsLegitimateReporting(unittest.TestCase):
                 validate(f"select count(*) from {v}")
 
 
+class TestMappingMemoryStaysPrivate(unittest.TestCase):
+    """Migration 007's tables (votes from every org, per-org file memory) are never readable by the assistant."""
+
+    def test_learning_tables_are_rejected(self):
+        for sql in ("select * from mapping_votes",
+                    "select header_key, count(*) from mapping_votes group by 1",
+                    "select * from v_sales join mapping_fingerprints on true",
+                    "select * from v_sales, public.mapping_votes",
+                    "with x as (select * from mapping_fingerprints) select * from x"):
+            with self.subTest(sql=sql), self.assertRaises(SqlRejected):
+                validate(sql)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

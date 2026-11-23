@@ -8,15 +8,19 @@ let generic synonyms win and read purchase and waste logs as sales.
 """
 
 import asyncio
+import contextlib
+import csv
+import io
+import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 from fastapi import HTTPException
 
-from app.cleaning import engine, referee
+from app.cleaning import engine, learning, referee
 from app.cleaning.fields import (ENTITY_KEY, auto_map, detect_entity, entity_check, entity_state, field_signature,
-                                 guess_field, missing_for)
+                                 guess_field, header_key, missing_for)
 from app.routers import data
 from app.services import ai
 
@@ -565,6 +569,369 @@ class ServerRefusesUnconfirmedType(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as e:
                 await data.set_mapping("u1", data.MappingIn(mapping={}, entity="payroll"), CTX)
         self.assertEqual(e.exception.status_code, 422)
+
+
+# ── Phase 3: learning from what companies confirm (cleaning/learning.py) ─────
+
+class FakeVotes:
+    """mapping_votes in memory, plus the aggregate data._SHARED_SQL computes from it."""
+
+    def __init__(self, fail=False):
+        self.rows: dict[tuple[str, str], tuple[str, str]] = {}  # (org, header_key) -> (field, user)
+        self.writes: list[tuple] = []
+        self.fail = fail
+
+    def transaction(self):
+        store = self
+
+        class Tx:
+            async def __aenter__(self):
+                conn = mock.AsyncMock()
+
+                async def executemany(sql, args):
+                    if "mapping_votes" not in sql:
+                        return  # the org's own cleaning_rules
+                    if store.fail:
+                        raise RuntimeError('relation "mapping_votes" does not exist')
+                    for org, key, field, user in args:
+                        store.writes.append((org, key, field, user))
+                        store.rows[(org, key)] = (field, user)
+                conn.executemany = executemany
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+        return Tx()
+
+    async def fetch(self, sql, *args):
+        assert "mapping_votes" in sql
+        orgs, voters, total = {}, {}, {}
+        for (org, key), (field, user) in self.rows.items():
+            orgs.setdefault((key, field), set()).add(org)
+            voters.setdefault((key, field), set()).add(user)
+            total[key] = total.get(key, 0) + 1
+        return [{"header_key": k, "field": f, "orgs": len(o), "voters": len(voters[(k, f)]), "total": total[k]}
+                for (k, f), o in orgs.items() if len(o) >= args[0]]
+
+
+DISH_H = ["رقم الطلب", "التاريخ", "اسم الطبق", "الكمية", "السعر"]
+DISH_ROWS = _rows([str(50000 + i) for i in range(8)], DATES, ITEMS, ["2"] * 8, ["3.5"] * 8)
+DISH = header_key("اسم الطبق")
+
+
+def ctx_of(org, user="user-1"):
+    return SimpleNamespace(org_id=org, user=SimpleNamespace(id=user))
+
+
+async def confirm(store, org, user, headers=DISH_H, rows=DISH_ROWS, change=None):
+    """One user saving the mapping screen: what Idrak showed, with `change` applied."""
+    before = auto_map(headers, rows)
+    chosen = {h: m["field"] for h, m in before.items()} | (change if change is not None else {"اسم الطبق": "product"})
+    upload = {"columns": headers, "mapping": json.loads(json.dumps(before)), "batch_id": None}
+    with mock.patch.object(data.db, "fetchrow", mock.AsyncMock(return_value=upload)), \
+            mock.patch.object(data.db, "transaction", store.transaction), \
+            mock.patch.object(data.db, "execute", mock.AsyncMock()):
+        return await data.set_mapping("u1", data.MappingIn(mapping=chosen), ctx_of(org, user))
+
+
+async def shared_now(store):
+    data.db.cache_clear("shared_synonyms")
+    with mock.patch.object(data.db, "fetch", store.fetch):
+        return await data._shared_synonyms()
+
+
+class SharedSynonyms(unittest.IsolatedAsyncioTestCase):
+    """A header >= 3 companies confirmed to the same field helps every company."""
+
+    def setUp(self):
+        data.db.cache_clear("shared_synonyms")
+
+    def tearDown(self):
+        data.db.cache_clear("shared_synonyms")
+
+    async def test_two_orgs_are_not_enough_three_are(self):
+        # "اسم الطبق" (dish name) reads as customer name by fuzzy match today.
+        self.assertEqual(auto_map(DISH_H, DISH_ROWS)["اسم الطبق"]["field"], "customer_name")
+        store = FakeVotes()
+        await confirm(store, "org-a", "user-a")
+        await confirm(store, "org-b", "user-b")
+        shared = await shared_now(store)
+        self.assertEqual(shared, {})
+        self.assertEqual(auto_map(DISH_H, DISH_ROWS, shared)["اسم الطبق"]["field"], "customer_name")
+
+        await confirm(store, "org-c", "user-c")
+        shared = await shared_now(store)
+        self.assertEqual(shared, {DISH: "product"})
+        m = auto_map(DISH_H, DISH_ROWS, shared)["اسم الطبق"]
+        self.assertEqual((m["field"], m["source"], m["review"]), ("product", "shared", False))
+
+    async def test_one_org_is_one_vote_however_often_it_confirms(self):
+        store = FakeVotes()
+        for user in ("user-a", "user-b", "user-c", "user-d"):
+            await confirm(store, "org-a", user)
+        await confirm(store, "org-b", "user-e")
+        self.assertEqual(len(store.rows), 2)
+        self.assertEqual(await shared_now(store), {})
+
+    async def test_one_person_with_three_orgs_is_not_enough(self):
+        store = FakeVotes()
+        for org in ("org-a", "org-b", "org-c"):
+            await confirm(store, org, "same-user")
+        self.assertEqual(await shared_now(store), {})
+
+    async def test_disagreement_blocks_promotion(self):
+        store = FakeVotes()
+        for org in ("org-a", "org-b", "org-c"):
+            await confirm(store, org, f"user-{org}")
+        await confirm(store, "org-d", "user-d", change={"اسم الطبق": None})  # "don't use" counts against
+        self.assertEqual(await shared_now(store), {})                        # 3 of 4 = 75%
+        await confirm(store, "org-e", "user-e")
+        self.assertEqual(await shared_now(store), {DISH: "product"})          # 4 of 5 = 80%
+
+    def test_promote_rules(self):
+        row = {"header_key": DISH, "field": "product", "orgs": 3, "voters": 3, "total": 3}
+        self.assertEqual(learning.promote([row]), {DISH: "product"})
+        self.assertEqual(learning.promote([{**row, "total": 4}]), {})                       # 75% agree
+        self.assertEqual(learning.promote([{**row, "voters": 2}]), {})                      # 2 people
+        self.assertEqual(learning.promote([{**row, "field": ""}]), {})                      # "don't use" never spreads
+        self.assertEqual(learning.promote([{**row, "field": "salary"}]), {})                # not an Idrak field
+        self.assertEqual(learning.promote([{**row, "header_key": "تاريخ", "field": "expiry_date",
+                                            "orgs": 9, "voters": 9, "total": 9}]), {})      # exact built-in
+        self.assertEqual(learning.promote([{**row, "header_key": "0791234567"}]), {})        # personal-looking
+
+    def test_never_above_an_exact_built_in_synonym(self):
+        m = auto_map(["التاريخ", "Dish"], _rows(DATES, ITEMS), {"تاريخ": "expiry_date", "dish": "date"})
+        self.assertEqual((m["التاريخ"]["field"], m["التاريخ"]["source"]), ("date", "rules"))
+        self.assertIsNone(m["Dish"]["field"])  # its shared field is taken by the exact match
+
+    def test_above_a_fuzzy_match(self):
+        m = auto_map(["اسم الزبون", "اسم الطبق"], _rows(ITEMS, ITEMS), {DISH: "customer_name"})
+        self.assertEqual(m["اسم الزبون"]["field"], "customer_name")   # exact still first
+        m = auto_map(["حالة الطلب", "اسم الطبق"], _rows(ITEMS, ITEMS), {DISH: "product"})
+        self.assertEqual(m["اسم الطبق"]["field"], "product")
+
+    def test_values_contradicting_a_shared_synonym_need_review(self):
+        h = ["اسم الطبق", "الكمية"]
+        m = auto_map(h, _rows([str(i) for i in range(8)], ["1"] * 8), {DISH: "product"})
+        self.assertEqual((m["اسم الطبق"]["field"], m["اسم الطبق"]["source"]), ("product", "shared"))
+        self.assertTrue(m["اسم الطبق"]["review"])
+        self.assertEqual(m["اسم الطبق"]["evidence"]["type"], "mismatch")
+        self.assertIn("اسم الطبق", referee.candidates(h, m))            # not sure: the AI referees it
+
+    def test_values_that_agree_make_it_sure_for_the_referee(self):
+        h = ["اسم الطبق", "الكمية"]
+        m = auto_map(h, _rows(ITEMS, ["1"] * 8), {DISH: "product"})
+        self.assertNotIn("اسم الطبق", referee.candidates(h, m))
+
+    def test_only_what_the_user_decided_is_a_vote(self):
+        h = ["اسم الطبق", "Ref", "Dish", "التاريخ", "Qty Sold", "Notes 2"]
+        before = {"اسم الطبق": {"field": "customer_name", "review": False},          # changed -> vote
+                  "Ref": {"field": "phone", "source": "values", "review": True},     # yellow, confirmed -> vote
+                  "Dish": {"field": "product", "source": "ai", "review": False},     # accepted as shown -> no
+                  "التاريخ": {"field": "date", "source": "rules"},                   # exact built-in -> no
+                  "Qty Sold": {"field": "quantity", "review": False},               # "don't use" -> vote ""
+                  "Notes 2": {"field": None, "source": "shared"}}                   # left empty -> no
+        chosen = {"اسم الطبق": "product", "Ref": "phone", "Dish": "product", "التاريخ": "expiry_date",
+                  "Qty Sold": None, "Notes 2": None, "not a column": "notes", ENTITY_KEY: "notes"}
+        self.assertEqual(sorted(learning.votes(h, before, chosen)),
+                         sorted([(header_key("اسم الطبق"), "product"), ("qty sold", ""), ("ref", "phone")]))
+
+    async def test_nothing_personal_is_stored_or_shared(self):
+        for h in ("0791234567", "+962 79 100 1601", "ahmad.k@gmail.com", "2025-01-01", "12345",
+                  "Column 7", "a", "x" * 41, "one two three four five six seven"):
+            self.assertIsNone(learning.shareable(h), h)
+        h = ["رقم الطلب", "0791234567", "ahmad.k@gmail.com", "اسم الطبق"]
+        rows = _rows([str(i) for i in range(8)], PHONES, ITEMS, ITEMS)
+        store = FakeVotes()
+        for org in ("org-a", "org-b", "org-c"):
+            await confirm(store, org, f"user-{org}", h, rows,
+                          change={"0791234567": "phone", "ahmad.k@gmail.com": "notes", "اسم الطبق": "product"})
+        self.assertEqual({w[1] for w in store.writes}, {DISH})               # only the normalized header
+        dump = json.dumps(store.writes, ensure_ascii=False)
+        for secret in [*PHONES, *ITEMS, "0791234567", "ahmad", "gmail"]:
+            self.assertNotIn(secret, dump)
+        shared = await shared_now(store)
+        self.assertEqual(shared, {DISH: "product"})
+        self.assertNotIn("org-", json.dumps(shared))
+        self.assertNotIn("org_id", data._SHARED_SQL.split("from", 1)[0])   # counts only, never who voted
+
+    async def test_fails_open(self):
+        async def boom(*args):
+            raise RuntimeError('relation "mapping_votes" does not exist')
+        with mock.patch.object(data.db, "fetch", boom), self.assertLogs(data.log, "WARNING"):
+            self.assertEqual(await data._shared_synonyms(), {})
+        with self.assertLogs(data.log, "WARNING"):
+            res = await confirm(FakeVotes(fail=True), "org-a", "user-a")   # vote write fails: the save still works
+        self.assertTrue(res["ok"])
+
+
+# Purchases from a supplier: a file whose type must be confirmed (phase 2).
+P_H = RestaurantExport.PURCHASES
+P_ROWS = _rows([f"P-{100 + i}" for i in range(8)], DATES, ["الفرع الرئيسي"] * 8, ["شركة الريحان للتوريد"] * 8, ITEMS,
+               ["12.5"] * 8, ["0.5"] * 8, ["10"] * 8, ["125"] * 8, ["16%"] * 8, ["مدفوع"] * 8, PAYMENTS,
+               [str(9000 + i) for i in range(8)], ["سليم"] * 8)
+
+
+def csv_bytes(headers, rows):
+    out = io.StringIO()
+    csv.writer(out).writerows([headers, *rows])
+    return out.getvalue().encode("utf-8")
+
+
+async def upload_file(headers, rows, fingerprint_row, name="purchases-march.csv"):
+    """data._create_upload with the DB mocked; returns (inserted mapping, entity, ai.map_columns mock, db.fetch mock)."""
+    fetchval, fetch = mock.AsyncMock(return_value="u2"), mock.AsyncMock(return_value=[])
+    map_columns = mock.AsyncMock(return_value={})
+    with contextlib.ExitStack() as st:
+        for p in (mock.patch.object(data.db, "fetchrow", mock.AsyncMock(return_value=fingerprint_row)),
+                  mock.patch.object(data.db, "fetch", fetch),
+                  mock.patch.object(data.db, "fetchval", fetchval),
+                  mock.patch.object(data.db, "execute", mock.AsyncMock()),
+                  mock.patch.object(data.db, "audit", mock.AsyncMock()),
+                  mock.patch.object(data, "get_upload", mock.AsyncMock(return_value={})),
+                  mock.patch.object(data, "_shared_synonyms", mock.AsyncMock(return_value={})),
+                  mock.patch.object(ai, "available", return_value=True),
+                  mock.patch.object(ai, "budget_reserve", mock.AsyncMock(return_value=True)),
+                  mock.patch.object(ai, "budget_release", mock.AsyncMock()),
+                  mock.patch.object(ai, "map_columns", map_columns)):
+            st.enter_context(p)
+        await data._create_upload(CTX, name, csv_bytes(headers, rows))
+    args = fetchval.await_args.args
+    return args[12], args[7], map_columns, fetch
+
+
+async def confirmed_record(headers=P_H, rows=P_ROWS, entity="supplier_prices"):
+    """What cleaning a confirmed file saves (data._remember_file), as the DB would return it."""
+    cur = auto_map(headers, rows)
+    body = data.MappingIn(mapping={h: m["field"] for h, m in cur.items()}, entity=entity)
+    execute = mock.AsyncMock()
+    upload = {"columns": headers, "mapping": json.loads(json.dumps(cur)), "batch_id": None}
+    with mock.patch.object(data.db, "fetchrow", mock.AsyncMock(return_value=upload)), \
+            mock.patch.object(data.db, "transaction", lambda: _Tx()), \
+            mock.patch.object(data.db, "execute", execute):
+        await data.set_mapping("u1", body, CTX)
+    saved = execute.await_args.args[3]
+    execute = mock.AsyncMock()
+    with mock.patch.object(data.db, "execute", execute):
+        await data._remember_file(CTX, headers, rows, saved, entity_state(headers, saved))
+    sql, org, fp, columns, ent, signature, by = execute.await_args.args
+    assert "mapping_fingerprints" in sql and org == "org-1" and fp == learning.fingerprint(headers)
+    return json.loads(json.dumps({"columns": columns, "entity": ent, "signature": signature, "confirmed_by": by}))
+
+
+class FileFingerprints(unittest.IsolatedAsyncioTestCase):
+    """The same export from the same company is mapped from its last confirmed file."""
+
+    async def test_same_file_again_is_instant_and_keeps_the_type_confirmation(self):
+        # First time: purchases need the user to confirm the type.
+        first, _, _, _ = await upload_file(P_H, P_ROWS, None)
+        self.assertTrue(entity_state(P_H, first)["blocked"])
+        record = await confirmed_record()
+        self.assertEqual(record["entity"], "supplier_prices")
+
+        # Next month, same columns (spelled a little differently), new values.
+        h2 = [h.replace("الكمية الموردة", "الكميه  الموردة") for h in P_H]
+        self.assertEqual(learning.fingerprint(h2), learning.fingerprint(P_H))
+        rows2 = [r[:] for r in P_ROWS]
+        for r in rows2:
+            r[0] = r[0].replace("P-", "P-2")
+        mapping, entity, map_columns, fetch = await upload_file(h2, rows2, record)
+        for h in h2:
+            self.assertEqual((mapping[h]["source"], mapping[h]["via"], mapping[h]["review"]), ("memory", "file", False), h)
+        self.assertEqual(mapping[h2[3]]["field"], "supplier")
+        map_columns.assert_not_awaited()                       # no AI call
+        fetch.assert_not_awaited()                             # no shared map / per-header rules needed
+        state = entity_state(h2, mapping)
+        self.assertEqual((state["blocked"], state["confirmed"], state["confirmed_via"]), (False, "supplier_prices", "file"))
+        self.assertEqual(entity, "supplier_prices")
+
+    async def test_changed_export_falls_back_to_review(self):
+        record = await confirmed_record()
+        qty = "الكمية الموردة"
+        i = P_H.index(qty)
+        rows2 = [r[:i] + [item] + r[i + 1:] for r, item in zip(P_ROWS, ITEMS)]   # names where quantities were
+        mapping, _, map_columns, _ = await upload_file(P_H, rows2, record)
+        m = mapping[qty]
+        self.assertEqual((m["field"], m["source"], m["review"]), ("quantity", "memory", True))  # field kept, flagged
+        self.assertEqual(m["evidence"]["type"], "mismatch")
+        self.assertEqual([h for h in P_H if mapping[h].get("review")], [qty])
+        self.assertNotIn(ENTITY_KEY, mapping)                   # the type is asked again
+        self.assertTrue(entity_state(P_H, mapping)["blocked"])
+        judge = map_columns.await_args.args[0]
+        self.assertEqual(list(judge), [qty])                    # only the changed column goes to the AI
+
+    def test_a_column_that_never_fully_fit_is_not_flagged_again(self):
+        h = ["Item", "طريقة الدفع"]
+        rows = _rows(ITEMS, ["شيك", "كاش", "شيك", "CLIQ", "شيك مؤجل", "كاش", "شيك", "نقدي"])
+        mapping = {"Item": {"field": "product", "source": "user"}, "طريقة الدفع": {"field": "payment_method", "source": "user"}}
+        _, saved = learning.file_memory(h, rows, mapping, {})
+        self.assertEqual(saved["columns"][header_key("طريقة الدفع")]["fit"], 0.5)
+        out, _ = learning.apply_file_memory(h, rows, saved)
+        self.assertFalse(out["طريقة الدفع"]["review"])           # the user already accepted these values
+
+    def test_dont_use_is_remembered_and_never_sent_to_the_ai(self):
+        h = ["Item", "Qty", "رقم الطاولة"]
+        rows = _rows(ITEMS, ["1"] * 8, ["4"] * 8)
+        mapping = {"Item": {"field": "product"}, "Qty": {"field": "quantity"}, "رقم الطاولة": {"field": None}}
+        _, saved = learning.file_memory(h, rows, mapping, {})
+        out, unused = learning.apply_file_memory(h, rows, saved)
+        self.assertEqual((out["رقم الطاولة"]["field"], unused), (None, {"رقم الطاولة"}))
+        self.assertEqual(referee.candidates(h, out, unused), [])
+
+    def test_not_remembered_while_a_column_is_under_review(self):
+        h = ["Item", "B"]
+        self.assertIsNone(learning.file_memory(h, _rows(ITEMS, PHONES),
+                                               {"Item": {"field": "product"}, "B": {"field": "phone", "review": True}}, {}))
+
+    def test_fingerprint(self):
+        self.assertEqual(learning.fingerprint(["Item_Name", "QTY "]), learning.fingerprint(["qty", "item name"]))
+        self.assertNotEqual(learning.fingerprint(["Item", "Qty"]), learning.fingerprint(["Item", "Qty", "Price"]))
+        self.assertIsNone(learning.fingerprint(["Total", "total"]))   # two columns read the same
+
+    def test_a_record_that_does_not_fit_is_ignored(self):
+        h = ["Item", "Qty"]
+        rows = _rows(ITEMS, ["1"] * 8)
+        _, saved = learning.file_memory(h, rows, {"Item": {"field": "product"}, "Qty": {"field": "quantity"}}, {})
+        self.assertIsNone(learning.apply_file_memory(["Item", "Price"], rows, saved))
+        bad = json.loads(json.dumps(saved))
+        bad["columns"]["qty"]["field"] = "salary"                    # a field Idrak no longer has
+        self.assertIsNone(learning.apply_file_memory(h, rows, bad))
+
+    async def test_nothing_personal_in_file_memory(self):
+        h = ["Item", "Phone", "Email"]
+        rows = _rows(ITEMS, PHONES, [f"user{i}@gmail.com" for i in range(8)])
+        mapping = {"Item": {"field": "product"}, "Phone": {"field": "phone"}, "Email": {"field": "email"}}
+        execute = mock.AsyncMock()
+        with mock.patch.object(data.db, "execute", execute):
+            await data._remember_file(CTX, h, rows, mapping, {"confirmed": None})
+        dump = json.dumps(execute.await_args.args[1:], ensure_ascii=False)
+        for secret in [*ITEMS, *PHONES, "gmail", "purchases-march.csv"]:
+            self.assertNotIn(secret, dump)
+
+    async def test_fails_open(self):
+        with mock.patch.object(data.db, "fetchrow", mock.AsyncMock(side_effect=RuntimeError("no table"))),                 self.assertLogs(data.log, "WARNING"):
+            self.assertIsNone(await data._load_file_memory("org-1", P_H))
+        with mock.patch.object(data.db, "execute", mock.AsyncMock(side_effect=RuntimeError("no table"))),                 self.assertLogs(data.log, "WARNING"):
+            await data._remember_file(CTX, ["Item"], _rows(ITEMS), {"Item": {"field": "product"}}, {})
+        # A broken record falls back to the normal mapping.
+        mapping, _, _, fetch = await upload_file(P_H, P_ROWS, {"columns": "garbage"})
+        self.assertEqual(mapping["اسم المورد"]["source"], "rules")
+        fetch.assert_awaited()                                    # per-header rules were read as before
+
+    async def test_clean_saves_the_file_memory(self):
+        h = ["Invoice No", "Date", "Item", "Qty", "Total"]
+        rows = _rows([str(i) for i in range(8)], DATES, ITEMS, ["2"] * 8, ["3.5"] * 8)
+        upload = {"id": "u1", "columns": h, "mapping": auto_map(h, rows), "batch_id": None, "entity": "sales"}
+        remember = mock.AsyncMock()
+        with mock.patch.object(data.db, "fetchrow", mock.AsyncMock(side_effect=[upload, {"raw_rows": rows}])), \
+                mock.patch.object(data.db, "transaction", lambda: _Tx()), \
+                mock.patch.object(data.db, "audit", mock.AsyncMock()), \
+                mock.patch.object(data, "load_context", mock.AsyncMock(return_value=engine.Context())), \
+                mock.patch.object(data, "get_run", mock.AsyncMock(return_value={})), \
+                mock.patch.object(data, "_remember_file", remember):
+            await data.clean("u1", CTX)
+        _, headers, raw, mapping, state = remember.await_args.args
+        self.assertEqual((headers, raw, mapping, state["entity"]), (h, rows, upload["mapping"], "sales"))
 
 
 if __name__ == "__main__":

@@ -73,11 +73,16 @@ for _key, _field in _SYN:
     _EXACT.setdefault(_key, _field)  # أول مرادف يفوز، نفس سلوك الحلقة القديمة
 
 
-def guess_field(header: str) -> tuple[str | None, float]:
+def header_key(header) -> str:
+    """A header as the matcher reads it; also the key of the shared synonyms and file fingerprints."""
     # أسماء الأعمدة بالأنظمة كثير فيها شرطات سفلية (item_name، received_by).
     # match_key بتخلّي "_" لأنها حرف كلمة، فما كانت تطابق المرادفات
     # المكتوبة بمسافة. نبدّلها قبل التطبيع.
-    k = match_key(str(header or "").replace("_", " "))
+    return match_key(str(header or "").replace("_", " "))
+
+
+def guess_field(header: str) -> tuple[str | None, float]:
+    k = header_key(header)
     if not k:
         return None, 0.0
     if k in _EXACT:
@@ -105,38 +110,58 @@ def _is_time_header(header: str) -> bool:
     return bool(set(match_key(str(header or "").replace("_", " ")).split()) & _TIME_WORDS)
 
 
-def auto_map(headers: list[str], rows: list[list] | None = None) -> dict[str, dict]:
+# A shared synonym (a header >= 3 companies confirmed, cleaning/learning.py)
+# is trusted like a good header match; the values still have the last word.
+SHARED_CONF = 0.95
+
+
+def auto_map(headers: list[str], rows: list[list] | None = None,
+             shared: dict[str, str] | None = None) -> dict[str, dict]:
     """Map headers to fields. With rows, the values are checked too (see profile.py):
-    each entry then also carries "review" and "evidence"."""
-    names = _map_by_name(headers)
+    each entry then also carries "review" and "evidence".
+
+    shared: header_key -> field learned across companies (learning.promote). It
+    beats a fuzzy match, never an exact built-in synonym; its columns get
+    source "shared".
+    """
+    names = _map_by_name(headers, shared)
     if rows is None:
         return names
     from .profile import refine_with_values  # profile imports this module
     return refine_with_values(headers, rows, names)
 
 
-def _map_by_name(headers: list[str]) -> dict[str, dict]:
-    guesses = {h: guess_field(h) for h in headers}
-    # نوزّع الحقول بالأقوى أولاً (التامّة قبل التقريبية) حتى لا يحجز عمود
-    # تقريبي ("حالة الدفع") حقلاً يطابقه عمود آخر تماماً ("طريقة الدفع").
-    # عند التعادل: أعمدة الوقت بعد غيرها (فيأخذ "التاريخ" حقل التاريخ)، ثم
-    # ترتيب الأعمدة الأصلي.
+def _guess(header: str, shared: dict[str, str] | None) -> tuple[str | None, float, str | None, int]:
+    """(field, confidence, source, tier): tier 0 exact built-in, 1 shared, 2 fuzzy, 3 nothing."""
+    f, conf = guess_field(header)
+    if f and conf >= 1.0:
+        return f, conf, "rules", 0
+    if shared and (s := shared.get(header_key(header))) in FIELDS:
+        return s, SHARED_CONF, "shared", 1
+    return (f, conf, "rules", 2) if f else (None, 0.0, None, 3)
+
+
+def _map_by_name(headers: list[str], shared: dict[str, str] | None = None) -> dict[str, dict]:
+    guesses = {h: _guess(h, shared) for h in headers}
+    # نوزّع الحقول بالأقوى أولاً (التامّة، ثم المرادف المشترك، ثم التقريبية)
+    # حتى لا يحجز عمود تقريبي ("حالة الدفع") حقلاً يطابقه عمود آخر تماماً
+    # ("طريقة الدفع"). عند التعادل: أعمدة الوقت بعد غيرها (فيأخذ "التاريخ"
+    # حقل التاريخ)، ثم ترتيب الأعمدة الأصلي.
     order = sorted(range(len(headers)),
-                   key=lambda i: (-guesses[headers[i]][1], _is_time_header(headers[i]), i))
+                   key=lambda i: (guesses[headers[i]][3], -guesses[headers[i]][1], _is_time_header(headers[i]), i))
     used: set[str] = set()
-    chosen: dict[str, tuple[str | None, float]] = {}
+    chosen: dict[str, tuple[str | None, float, str | None]] = {}
     for i in order:
         h = headers[i]
-        f, conf = guesses[h]
+        f, conf, source, _ = guesses[h]
         if f == "date" and "date" in used and "sale_time" not in used and _is_time_header(h):
             f = "sale_time"
         if f and f in used:
             f, conf = None, 0.0
         if f:
             used.add(f)
-        chosen[h] = (f, conf)
-    return {h: {"field": chosen[h][0], "confidence": round(chosen[h][1], 2),
-                "source": "rules" if chosen[h][0] else None} for h in headers}
+        chosen[h] = (f, conf, source if f else None)
+    return {h: {"field": chosen[h][0], "confidence": round(chosen[h][1], 2), "source": chosen[h][2]} for h in headers}
 
 
 _WASTE_PREFIXES = tuple(match_key(w) for w in ("هدر", "تالف", "waste", "spoil"))
@@ -287,6 +312,8 @@ def entity_state(headers: list[str], mapping: dict | None) -> dict:
     saved = mapping.get(ENTITY_KEY) or {}
     ok = saved.get("entity") in ENTITIES and saved.get("fields") == field_signature(cols)
     state["confirmed"] = saved["entity"] if ok else None
+    # "file": carried over from the company's last file with the same columns.
+    state["confirmed_via"] = saved.get("via") if ok else None
     state["entity"] = state["confirmed"] or state["detected"]
     state["blocked"] = state["needs_confirmation"] and not state["confirmed"]
     return state
