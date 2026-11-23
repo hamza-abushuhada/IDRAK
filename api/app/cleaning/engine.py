@@ -105,6 +105,40 @@ def _fmt_num(x: float, money: bool) -> str:
     return str(int(x)) if float(x).is_integer() else f"{x:.3f}".rstrip("0").rstrip(".")
 
 
+# Words that say what kind of business a name is, or how much of a product, not
+# which one (already in match_key form). Fuzzy "one shared word is enough" matching
+# merged "Al Wafa Trading" into "Al Najah Food" (both "al") and a garlic sack into
+# "Mixed Grill 1kg" (both "kg"); these words never count as the shared one.
+GENERIC = frozenset("""
+    al el the co company est establishment trading trade traders import imports export distribution dist
+    distributors food foods supplies supply group jordan jordanian international intl ltd llc inc factory
+    industries of and for with
+    شركه موسسه تجاره للتجاره لتجاره تجاريه توزيع للتوزيع استيراد تصدير مواد للمواد غذاييه اغذيه للاغذيه
+    توريدات للتوريدات مجموعه اردن اردني اردنيه دوليه مصنع مصانع صناعات لصناعه مع و ذ م
+    ml l g kg pc can ctn
+""".split())
+
+
+def core_words(mk: str) -> list[str]:
+    """The words of a match_key that tell one name from another."""
+    return [t for t in mk.split() if t not in GENERIC and not t.replace(".", "").isdigit()]
+
+
+def subset_match(a: str, b: str) -> bool:
+    """Every distinctive word of the shorter name is in the longer one (spelling slips allowed).
+
+    "Al Maha Dairy" ~ "Al Maha Dairy Jordan", "الرائد تجارة" ~ "مؤسسة الرائد التجارية";
+    but not "Al Wafa Trading" ~ "Al Najah Food", nor "خبز شاورما" ~ "وجبة شاورما لحم".
+    """
+    ca, cb = core_words(a), core_words(b)
+    if not ca or not cb:
+        return False
+    short, long_ = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    if sum(len(t) for t in short) < 4:
+        return False
+    return all(any(t == u or (min(len(t), len(u)) >= 4 and fuzz.ratio(t, u) >= 85) for u in long_) for t in short)
+
+
 class Matcher:
     def __init__(self, entries: list[dict], loose: bool = False):
         self.entries = entries
@@ -140,9 +174,15 @@ class Matcher:
         sk = skeleton(value)
         if sk in self.skel and nums(self.entries[self.skel[sk]]["name"]) == vn:
             return self.entries[self.skel[sk]]["name"], 0.8
-        best = process.extractOne(k, ckeys, scorer=fuzz.partial_token_set_ratio)
-        if best and best[1] >= (90 if self.loose else 95) and len(k) >= 4:
-            return self.entries[self.owner[cands[best[2]]]]["name"], 0.7
+        # One name inside the other ("بيبسي" in "بيبسي 330 مل علبة"). partial_token_set_ratio
+        # alone scores 100 on a single shared word, so it only shortlists; subset_match
+        # decides, and two different catalog products matching means it's ambiguous.
+        if len(k) >= 4:
+            shortlist = process.extract(k, ckeys, scorer=fuzz.partial_token_set_ratio,
+                                        score_cutoff=90 if self.loose else 95, limit=25)
+            owners = {self.owner[cands[i]] for _, _, i in shortlist if subset_match(k, ckeys[i])}
+            if len(owners) == 1:
+                return self.entries[owners.pop()]["name"], 0.7
         return None, 0
 
 
@@ -165,9 +205,12 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
             continue
         mk, sk, nm, ar = match_key(disp), skeleton(disp), tuple(nums(disp)), is_arabic(disp)
         target, conf = exact.get(mk), 1.0
+        # Business names bucket by their first distinctive word, so "مؤسسة الرائد"
+        # meets "الرائد تجارة" (they start with different letters).
+        bucket_key = " ".join(core_words(mk)) or mk if loose else mk
         if target is None:
             buckets = by_nums.setdefault(nm, {})
-            first = mk[:1]
+            first = bucket_key[:1]
             # buckets.get() بترجّع قائمة لو المفتاح موجود و tuple افتراضي
             # لو مش موجود — جمعهم مع بعض كان يفشل. نطبيع الحالتين لقائمة.
             cands = list(buckets.get(first, []))
@@ -180,13 +223,13 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
                 if sk and sk == g["sk"] and ar != g["ar"] and len(sk.replace(" ", "")) >= (3 if loose else 4):
                     target, conf = g, 0.8
                     break
-                if loose and min(len(mk), len(g["mk"])) >= 4 and fuzz.partial_token_set_ratio(mk, g["mk"]) >= 95:
+                if loose and min(len(mk), len(g["mk"])) >= 4 and subset_match(mk, g["mk"]):
                     target, conf = g, 0.75
                     break
         if target is None:
             g = {"mk": mk, "sk": sk, "nums": nm, "ar": ar, "canon": disp, "members": [(raw, 1.0, cnt)]}
             groups.append(g)
-            by_nums.setdefault(nm, {}).setdefault(mk[:1], []).append(g)
+            by_nums.setdefault(nm, {}).setdefault(bucket_key[:1], []).append(g)
             exact[mk] = g
         else:
             target["members"].append((raw, conf, cnt))

@@ -1107,7 +1107,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         continue
             stats["old_costs"] = old_costs
         learned = 0
-        pairs = {(ch["column_name"], ch["old_value"], ch["new_value"]) for ch in changes if ch["rule"] in MERGE_RULES and ch["status"] != "rejected"}
+        # Only merges the user approved become memory. Learning every merge that
+        # wasn't rejected saved Idrak's own unreviewed guesses (a garlic sack →
+        # "Mixed Grill 1kg") as rules that then rewrote every later file.
+        pairs = {(ch["column_name"], ch["old_value"], ch["new_value"]) for ch in changes if ch["rule"] in MERGE_RULES and ch["status"] == "approved"}
         rule_recs = []
         for col, old, new in list(pairs)[:150]:
             kind = kind_of((run["mapping"].get(col) or {}).get("field"))
