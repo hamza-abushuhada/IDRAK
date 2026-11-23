@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 
 from .. import db
+from ..cleaning.fields import FIELDS
 from ..config import settings
 
 log = logging.getLogger("idrak.ai")
@@ -149,16 +150,28 @@ async def generate_json(prompt: str, system: str, org_id=None, user_id=None, kin
     return None
 
 
-MAPPING_SYSTEM = """You map spreadsheet columns from Jordanian small businesses (Arabic, English or mixed headers) to Idrak fields.
-Allowed fields: invoice_number, date, branch, cashier, product, barcode, sku, category, quantity, unit_price, cost, total, discount,
-payment_method, customer_name, phone, email, city, area, supplier, carton_price, pack_size, stock, expiry_date, updated_at, notes, gender.
-Also allowed: minimum_stock, tax.
-Use null when no field fits. Each field can be used at most once. Look at sample values, not only headers.
-Return JSON: {"columns": {"<header>": {"field": "<field or null>", "confidence": 0..1, "reason": "<short english>"}}}"""
+def available() -> bool:
+    return bool(settings.gemini_api_key)
 
 
-async def map_columns(headers: list[str], samples: dict[str, list], org_id=None, user_id=None) -> dict | None:
-    prompt = json.dumps({"headers": headers, "samples": {h: [str(v) for v in samples.get(h, [])[:6]] for h in headers}}, ensure_ascii=False)
+MAPPING_SYSTEM = f"""You are the referee for spreadsheet column mapping at Idrak, for Jordanian small businesses
+(Arabic, English or mixed headers). Rules already read the column names and values; you judge only the columns in "judge".
+For each one, decide which Idrak field it holds from its header AND its sample values (some digits are masked with x).
+Allowed fields: {", ".join(FIELDS)}. Use null when no field fits.
+"current_guess" is the rules' guess (null = none) and "value_check" says what the values look like. If the current guess is right, return it.
+Fields used in "already_mapped" are taken: never return them. Use each field at most once.
+confidence: 0.9 or more only when header and values clearly agree; 0.5 or less when unsure.
+Return JSON only: {{"columns": {{"<header>": {{"field": "<field or null>", "confidence": 0..1, "reason": "<at most 12 words, English>"}}}}}}"""
+
+
+async def map_columns(judge: dict[str, dict], decided: dict[str, str], org_id=None, user_id=None) -> dict | None:
+    """Referee the columns in `judge` ({header: {"samples", "current_guess", "value_check"}}).
+
+    `decided` ({header: field}) are settled columns; their fields are off limits.
+    Returns {header: {"field", "confidence", "reason"}} or None. The call is
+    tracked like every other (track -> ai_usage + ai_budget_day).
+    """
+    prompt = json.dumps({"judge": judge, "already_mapped": decided}, ensure_ascii=False)
     res = await generate_json(prompt, MAPPING_SYSTEM, org_id, user_id, "mapping")
     if isinstance(res, dict) and isinstance(res.get("columns"), dict):
         return res["columns"]

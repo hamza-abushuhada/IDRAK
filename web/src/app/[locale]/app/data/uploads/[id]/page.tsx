@@ -8,18 +8,32 @@ import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
 import { ErrorBox, PageHeader, Section } from "@/components/app/kit";
-import { Badge, Button, Skeleton } from "@/components/ui";
+import { Badge, Button, Select, Skeleton } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 
 // ما يقوله شكل القيم عن العمود (api/app/cleaning/profile.py).
 type Evidence = { type: "mismatch" | "discovered"; kind: string; share: number };
+// رأي الذكاء الاصطناعي كحَكَم (api/app/cleaning/referee.py): يوافق أو يقترح حقلاً آخر.
+type AiVerdict = { field: string | null; confidence: number; reason: string; agrees: boolean; taken_by?: string };
+// لماذا نوع الملف يحتاج تأكيد (api/app/cleaning/fields.py: entity_check).
+type EntityReason =
+  | { code: "purchase_guard" | "waste_guard"; instead_of: string }
+  | { code: "mixed_signals"; signal: "purchase" | "waste" }
+  | { code: "missing_required"; fields: string[] }
+  | { code: "unconfirmed_fields"; columns: string[]; instead_of: string }
+  | { code: "unrecognized" };
+type EntityCheck = {
+  detected: string; entity: string; confirmed: string | null; needs_confirmation: boolean; blocked: boolean;
+  reasons: EntityReason[]; suggested: string[];
+};
 type Upload = {
   id: string; file_name: string; entity: string; row_count: number; column_count: number; columns: string[];
   mapping: Record<string, {
     field: string | null; confidence: number; source: string | null; reason?: string;
-    review?: boolean; evidence?: Evidence | null;
+    review?: boolean; evidence?: Evidence | null; ai?: AiVerdict | null;
   }>;
   preview: unknown[][]; fields: { key: string; kind: string; en: string; ar: string }[]; entity_label: [string, string]; last_run_id: string | null;
+  entity_check: EntityCheck; entities: Record<string, { en: string; ar: string; needs: string[][] }>;
 };
 
 // أنواع القيم كما تظهر للمستخدم، بمفاتيح profile.py.
@@ -95,6 +109,8 @@ export default function MappingPage() {
   const q = useApiQuery<Upload>(`/data/uploads/${id}`);
   const [mapping, setMapping] = useState<Record<string, string | null>>({});
   const [confirmed, setConfirmed] = useState<Record<string, boolean>>({});
+  // نوع الملف اللي اختاره أو أكّده المستخدم بهالجلسة (null = ما لمسه).
+  const [entityChoice, setEntityChoice] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
   const [phase, setPhase] = useState(0);
 
@@ -124,10 +140,51 @@ export default function MappingPage() {
   };
   const columnsAr = (n: number) => (n === 1 ? "عمود واحد" : n === 2 ? "عمودين" : n <= 10 ? `${n} أعمدة` : `${n} عمود`);
 
+  // نوع الملف: إذا إشاراته ضعيفة أو متضاربة، التنظيف ينتظر تأكيد المستخدم
+  // (والسيرفر كمان يرفض). نفس فكرة الأعمدة الصفراء.
+  const check = u?.entity_check;
+  const entity = entityChoice ?? check?.entity ?? u?.entity ?? "unknown";
+  const entityLabel = (e: string) => { const l = u?.entities?.[e]; return l ? tx(l.en, l.ar) : e; };
+  const entityPending = !!check && check.needs_confirmation && !check.confirmed && entityChoice === null;
+  const mappedFields = new Set(Object.values(mapping).filter((f): f is string => !!f));
+  const missingForEntity = (u?.entities?.[entity]?.needs ?? []).filter((alts) => !alts.some((f) => mappedFields.has(f))).map((alts) => alts[0]);
+  const reasonText = (r: EntityReason) => {
+    switch (r.code) {
+      case "purchase_guard":
+        return tx("The column names say these are purchases from a supplier, not sales. Idrak will only update your item costs from it.",
+                  "أسماء الأعمدة بتقول إنها مشتريات من مورد مش مبيعات. إدراك رح يحدّث تكلفة الأصناف منه بس.");
+      case "waste_guard":
+        return tx("This looks like a waste or spoilage log. Idrak doesn't import waste yet, so nothing will be imported from it.",
+                  "شكله سجل هدر وتالف. إدراك لسا ما بيستورد الهدر، فما رح ينستورد منه إشي.");
+      case "mixed_signals":
+        return r.signal === "purchase"
+          ? tx("It reads like sales, but some column names talk about suppliers or purchases.", "بينقرأ كمبيعات، بس في أعمدة أسماؤها عن موردين أو مشتريات.")
+          : tx("It reads like sales, but some column names talk about waste or spoilage.", "بينقرأ كمبيعات، بس في أعمدة أسماؤها عن هدر أو تالف.");
+      case "missing_required":
+        return tx(`Missing for this type: ${r.fields.map(label).join(", ")}`, `ناقص لهالنوع: ${r.fields.map(label).join("، ")}`);
+      case "unconfirmed_fields":
+        return tx(`The type depends on columns Idrak isn't sure about: ${r.columns.join(", ")}`,
+                  `النوع معتمد على أعمدة إدراك مش متأكد منها: ${r.columns.join("، ")}`);
+      case "unrecognized":
+        return tx("Idrak couldn't tell what this file is.", "إدراك ما عرف شو نوع هالملف.");
+    }
+  };
+
   async function clean() {
     setCleaning(true);
     try {
-      await api(`/data/uploads/${id}/mapping`, { method: "PUT", json: { mapping } });
+      const saved = await api<{ entity_check: EntityCheck }>(`/data/uploads/${id}/mapping`, {
+        method: "PUT", json: { mapping, ...(entityChoice ? { entity: entityChoice } : {}) },
+      });
+      // تغيير الأعمدة ممكن يغيّر نوع الملف: إذا صار بدّه تأكيد، نوقف ونسأل.
+      if (saved.entity_check?.blocked) {
+        toast(tx("Confirm the file type", "أكّد نوع الملف"),
+              tx("Your column changes made Idrak unsure what this file is. Pick its type, then clean.",
+                 "تعديل الأعمدة خلّى إدراك مش متأكد من نوع الملف. اختار نوعه وبعدين نظّف."), "info");
+        setCleaning(false);
+        q.refetch();
+        return;
+      }
       const run = await api<{ id: string }>(`/data/uploads/${id}/clean`, { method: "POST" });
       router.push(`/${locale}/app/data/runs/${run.id}`);
     } catch (e) {
@@ -143,10 +200,51 @@ export default function MappingPage() {
   return (
     <div>
       <PageHeader eyebrow={tx("Step 1 of 2 · Map columns", "خطوة 1 من 2 · ربط الأعمدة")} title={u ? u.file_name : <Skeleton className="h-8 w-64" />}
-        subtitle={u ? tx(`${u.row_count.toLocaleString()} rows · ${u.column_count} columns · detected: ${u.entity_label[0]}`, `${u.row_count.toLocaleString()} صف · ${u.column_count} عمود · نوع الملف: ${u.entity_label[1]}`) : undefined}
-        actions={<Button size="lg" onClick={clean} loading={cleaning} disabled={!u || pending.length > 0} data-basira="clean-button"
-          title={pending.length ? tx("Check the yellow columns first", "راجع الأعمدة الصفراء أولاً") : undefined}>
+        subtitle={u ? tx(`${u.row_count.toLocaleString()} rows · ${u.column_count} columns · detected: ${entityLabel(entity)}`, `${u.row_count.toLocaleString()} صف · ${u.column_count} عمود · نوع الملف: ${entityLabel(entity)}`) : undefined}
+        actions={<Button size="lg" onClick={clean} loading={cleaning} disabled={!u || pending.length > 0 || entityPending} data-basira="clean-button"
+          title={entityPending ? tx("Confirm the file type first", "أكّد نوع الملف أولاً")
+            : pending.length ? tx("Check the yellow columns first", "راجع الأعمدة الصفراء أولاً") : undefined}>
           <Wand2 size={16} />{tx("Clean with Idrak", "نظّف بإدراك")}</Button>} />
+
+      {u && check && (check.needs_confirmation || check.confirmed || entityChoice) && (
+        <div className={clsx("mb-4 rounded-[var(--radius-card)] border px-5 py-3.5",
+          entityPending ? "border-saffron/40 bg-saffron-soft" : "border-line bg-paper")} data-basira="entity-confirm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className={clsx("flex items-center gap-2 text-[13.5px]", entityPending ? "text-[#8a5d0e]" : "text-ink-2")}>
+              {entityPending ? <AlertTriangle size={16} className="shrink-0" /> : <Check size={16} className="shrink-0 text-olive" />}
+              {entityPending
+                ? tx(`Idrak thinks this is a ${entityLabel(entity)} file, but isn't sure. Confirm or choose its type before cleaning.`,
+                     `إدراك بيتوقع إنه الملف ${entityLabel(entity)}، بس مش متأكد. أكّد نوعه أو اختار غيره قبل التنظيف.`)
+                : tx(`File type: ${entityLabel(entity)} (confirmed)`, `نوع الملف: ${entityLabel(entity)} (مؤكَّد)`)}
+            </p>
+            <div className="flex items-center gap-2">
+              <Select value={entity} onChange={(e) => setEntityChoice(e.target.value)} className="h-9 text-[13px]"
+                aria-label={tx("File type", "نوع الملف")}>
+                {Object.keys(u.entities).map((k) => <option key={k} value={k}>{entityLabel(k)}</option>)}
+              </Select>
+              {entityPending && (
+                <Button size="sm" variant="secondary" onClick={() => setEntityChoice(entity)}>
+                  <Check size={14} />{tx("Yes, that's right", "صح، هيك")}
+                </Button>
+              )}
+            </div>
+          </div>
+          {entityPending && check.reasons.length > 0 && (
+            <ul className="mt-2 list-disc space-y-0.5 ps-9 text-[12.5px] text-[#8a5d0e]">
+              {check.reasons.map((r, i) => <li key={i}>{reasonText(r)}</li>)}
+            </ul>
+          )}
+          {entity === "unknown" ? (
+            <p className="mt-2 ps-6 text-[12px] text-ink-3">
+              {tx("A generic table is checked and cleaned, but nothing from it is imported.", "الجدول العام بينفحص وبيتنظّف، بس ما بينستورد منه إشي.")}
+            </p>
+          ) : missingForEntity.length > 0 && !entityPending && (
+            <p className="mt-2 ps-6 text-[12px] text-[#8a5d0e]">
+              {tx(`Missing for this type: ${missingForEntity.map(label).join(", ")}`, `ناقص لهالنوع: ${missingForEntity.map(label).join("، ")}`)}
+            </p>
+          )}
+        </div>
+      )}
 
       {u && pending.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-saffron/40 bg-saffron-soft px-5 py-3.5">
@@ -186,6 +284,9 @@ export default function MappingPage() {
               const isPending = pending.includes(c);
               const reason = m?.evidence ? why(m.evidence)
                 : m?.reason || (isPending ? tx("Not sure about this match", "إدراك مش متأكد من هالربط") : null);
+              // اقتراح الحَكَم: لا نعرض زر "استخدمه" لحقل مأخوذ بعمود ثاني الآن.
+              const ai = m?.ai;
+              const aiTaken = ai?.field ? takenBy(ai.field) : undefined;
               return (
                 <div key={c} className={clsx("grid items-center gap-3 px-5 py-3 md:grid-cols-[1.1fr_1.6fr_1fr]", isPending && "bg-saffron-soft/50")}>
                   <div className="min-w-0">
@@ -200,6 +301,26 @@ export default function MappingPage() {
                         : <Badge>{tx("Not used", "غير مستخدم")}</Badge>}
                       {reason && <span className="truncate">{reason}</span>}
                     </p>
+                    {ai && m?.source !== "ai" && (ai.agrees ? (
+                      <p className="mt-0.5 flex items-center gap-1 text-[11.5px] text-olive">
+                        <Sparkles size={11} className="shrink-0" />
+                        <span className="truncate">{tx("AI agrees", "الذكاء الاصطناعي موافق")}{ai.reason ? ` · ${ai.reason}` : ""}</span>
+                      </p>
+                    ) : (
+                      <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11.5px] text-terra">
+                        <Sparkles size={11} className="shrink-0" />
+                        <span>{tx("AI suggests:", "الذكاء الاصطناعي بيقترح:")} <b className="font-medium">{ai.field ? label(ai.field) : tx("don't use", "لا تستخدم")}</b>
+                          {ai.reason ? ` · ${ai.reason}` : ""}</span>
+                        {aiTaken ? (
+                          <span className="text-ink-3">{tx(`(already used by “${aiTaken}”)`, `(مستخدم بعمود “${aiTaken}”)`)}</span>
+                        ) : chosen !== (ai.field ?? "") && (
+                          <button type="button" onClick={() => setMapping({ ...mapping, [c]: ai.field })}
+                            className="font-medium underline-offset-2 hover:underline">
+                            {tx("Use it", "استخدمه")}
+                          </button>
+                        )}
+                      </p>
+                    ))}
                   </div>
                   <div className="flex min-w-0 flex-wrap gap-1.5">
                     {samples.map((s, i) => <span key={i} className="max-w-[180px] truncate rounded-md bg-paper-2 px-2 py-0.5 font-mono text-[12px] text-ink-2">{String(s)}</span>)}

@@ -152,21 +152,32 @@ def _starts_with_any(tokens: set[str], prefixes: tuple[str, ...]) -> bool:
     return any(t.startswith(p) for t in tokens for p in prefixes)
 
 
+def _looks_purchase(fields: set[str], tokens: set[str]) -> bool:
+    return "supplier" in fields or _starts_with_any(tokens, _PURCHASE_PREFIXES) or bool(tokens & _PURCHASE_WORDS)
+
+
 def detect_entity(fields: set[str], headers: list[str] | None = None) -> str:
-    tokens = _header_tokens(headers)
-    # سجلّ هدر/تالف (صنف + كمية + تاريخ) كان يُقرأ مبيعات، فيدخل الهدر كإيراد.
-    # إدراك ما بيدعم الهدر لسا، فالأسلم جدول عام لا يُستورد منه شيء.
-    if _starts_with_any(tokens, _WASTE_PREFIXES) and not ({"cashier", "customer_name", "payment_method"} & fields):
-        return "unknown"
-    # فواتير مشتريات من مورد كانت تُقرأ مبيعات (واسم المورد كزبون) فتتسجّل
-    # المشتريات كإيرادات. نعاملها كقائمة أسعار مورد: تحدّث تكلفة الأصناف فقط.
-    # لا ينطبق على مبيعات فيها كاشير/زبون، ولا على كتالوج أصناف فيه مخزون.
-    looks_purchase = ("supplier" in fields or _starts_with_any(tokens, _PURCHASE_PREFIXES)
-                      or bool(tokens & _PURCHASE_WORDS))
-    if looks_purchase and not ({"cashier", "customer_name", "stock", "minimum_stock"} & fields):
-        if "product" in fields and ({"unit_price", "cost", "carton_price"} & fields):
-            return "supplier_prices"
-        return "unknown"
+    return _detect(fields, _header_tokens(headers))[0]
+
+
+def _detect(fields: set[str], tokens: set[str], guards: bool = True) -> tuple[str, str | None]:
+    """(entity, the guard that decided it: "waste" | "purchase" | None)."""
+    if guards:
+        # سجلّ هدر/تالف (صنف + كمية + تاريخ) كان يُقرأ مبيعات، فيدخل الهدر كإيراد.
+        # إدراك ما بيدعم الهدر لسا، فالأسلم جدول عام لا يُستورد منه شيء.
+        if _starts_with_any(tokens, _WASTE_PREFIXES) and not ({"cashier", "customer_name", "payment_method"} & fields):
+            return "unknown", "waste"
+        # فواتير مشتريات من مورد كانت تُقرأ مبيعات (واسم المورد كزبون) فتتسجّل
+        # المشتريات كإيرادات. نعاملها كقائمة أسعار مورد: تحدّث تكلفة الأصناف فقط.
+        # لا ينطبق على مبيعات فيها كاشير/زبون، ولا على كتالوج أصناف فيه مخزون.
+        if _looks_purchase(fields, tokens) and not ({"cashier", "customer_name", "stock", "minimum_stock"} & fields):
+            if "product" in fields and ({"unit_price", "cost", "carton_price"} & fields):
+                return "supplier_prices", "purchase"
+            return "unknown", "purchase"
+    return _detect_by_fields(fields), None
+
+
+def _detect_by_fields(fields: set[str]) -> str:
     if {"product", "quantity"} <= fields and ({"date", "invoice_number"} & fields):
         return "sales"
     if "supplier" in fields and ({"carton_price", "pack_size"} & fields):
@@ -180,6 +191,105 @@ def detect_entity(fields: set[str], headers: list[str] | None = None) -> str:
     if {"customer_name", "phone"} & fields:
         return "customers"
     return "unknown"
+
+
+# ── Is the detected file type safe to import without asking? ──────────────────
+# detect_entity() always answers, even when its signals are weak or point two
+# ways. A wrong type is the costliest mistake (purchases imported as revenue, a
+# waste log as sales), so the mapping screen asks the user to confirm the type
+# whenever one of these holds, and clean/apply refuse until they have:
+#   purchase_guard / waste_guard  a guard turned what the fields alone read as
+#                                 another type into supplier_prices / unknown
+#   mixed_signals                 read as sales, but the headers also talk about
+#                                 suppliers, purchases or waste
+#   missing_required              the type's import needs a field no column has
+#   unconfirmed_fields            the type changes if the columns still under
+#                                 review (or filled by the AI alone) are left out
+#   unrecognized                  nothing tells what the file is (generic table)
+
+ENTITIES = tuple(REQUIRED)
+
+# What importing each type really needs; each item is met by any of its fields.
+# The importer derives a sale's unit price from total ÷ quantity, and a supplier
+# price list stores the cost column, else the price.
+_STANDS_IN = {("sales", "unit_price"): ["total"], ("supplier_prices", "unit_price"): ["cost"]}
+NEEDS = {e: [[f, *_STANDS_IN.get((e, f), [])] for f in fs] for e, fs in REQUIRED.items()}
+
+# The user's confirmed type is kept inside uploads.mapping under this key (no
+# schema change). Every reader of mapping looks columns up by header, so a
+# header with this exact name is the only clash, and set_mapping refuses it.
+ENTITY_KEY = "__idrak_entity__"
+
+
+def missing_for(entity: str, fields: set[str]) -> list[str]:
+    return [item[0] for item in NEEDS.get(entity, []) if not set(item) & fields]
+
+
+def _mapped(cols: dict[str, dict]) -> set[str]:
+    return {m["field"] for m in cols.values() if m.get("field")}
+
+
+def entity_check(headers: list[str], cols: dict[str, dict]) -> dict:
+    """Detected type plus the reasons it needs the user's confirmation.
+
+    cols: header -> mapping entry ({"field", "review", ...}), headers only.
+    """
+    fields = _mapped(cols)
+    tokens = _header_tokens(headers)
+    entity, guard = _detect(fields, tokens)
+    reasons: list[dict] = []
+    suggested: list[str] = []
+
+    if guard:
+        plain = _detect_by_fields(fields)
+        if plain != entity:
+            # Not suggested: the fields-only reading (usually sales) is the very
+            # mistake the guard prevents. The user can still choose it.
+            reasons.append({"code": f"{guard}_guard", "instead_of": plain})
+    elif entity == "sales":
+        signal = ("purchase" if _looks_purchase(fields, tokens)
+                  else "waste" if _starts_with_any(tokens, _WASTE_PREFIXES) else None)
+        if signal:
+            reasons.append({"code": "mixed_signals", "signal": signal})
+            suggested.append("supplier_prices" if signal == "purchase" else "unknown")
+    if entity != "unknown" and (missing := missing_for(entity, fields)):
+        reasons.append({"code": "missing_required", "fields": missing})
+    # Under review, or filled by the AI alone (no header match): neither may
+    # decide the type without the user seeing it.
+    unsure = [h for h in headers if (m := cols.get(h) or {}).get("field")
+              and (m.get("review") or m.get("source") == "ai")]
+    if unsure:
+        sure = _mapped({h: m for h, m in cols.items() if h not in unsure})
+        without = _detect(sure, tokens)[0]
+        if without != entity:
+            reasons.append({"code": "unconfirmed_fields", "columns": unsure, "instead_of": without})
+            suggested.append(without)
+    if entity == "unknown" and not guard:
+        reasons.append({"code": "unrecognized"})
+    return {"detected": entity, "needs_confirmation": bool(reasons), "reasons": reasons,
+            "suggested": [e for i, e in enumerate(suggested) if e != entity and e not in suggested[:i]]}
+
+
+def field_signature(cols: dict[str, dict]) -> list[list[str]]:
+    """Which column holds which field; a confirmation is only valid for this mapping."""
+    return sorted([h, m["field"]] for h, m in cols.items() if m.get("field"))
+
+
+def entity_state(headers: list[str], mapping: dict | None) -> dict:
+    """entity_check() plus the user's saved confirmation, read from uploads.mapping.
+
+    "entity" is the type to clean and import with (the confirmed one, else the
+    detected one) and "blocked" means it may not be cleaned or imported yet.
+    """
+    mapping = mapping or {}
+    cols = {h: mapping.get(h) or {} for h in headers}
+    state = entity_check(headers, cols)
+    saved = mapping.get(ENTITY_KEY) or {}
+    ok = saved.get("entity") in ENTITIES and saved.get("fields") == field_signature(cols)
+    state["confirmed"] = saved["entity"] if ok else None
+    state["entity"] = state["confirmed"] or state["detected"]
+    state["blocked"] = state["needs_confirmation"] and not state["confirmed"]
+    return state
 
 
 def kind_of(field: str | None) -> str | None:

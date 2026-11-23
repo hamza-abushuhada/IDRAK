@@ -198,11 +198,14 @@ def cluster_values(values: Counter, kind: str = "product") -> dict[str, tuple[st
 
 
 def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ctx: Context | None = None,
-        today: dt.date | None = None, price_unit: str = "jd", date_order: str = "auto") -> dict:
+        today: dt.date | None = None, price_unit: str = "jd", date_order: str = "auto",
+        entity: str | None = None) -> dict:
     ctx = ctx or Context()
     today = today or dt.date.today()
     fields = {h: mapping.get(h) for h in headers}
-    entity = detect_entity({f for f in fields.values() if f}, headers)
+    # The type the user confirmed on the mapping screen wins over detection.
+    if entity not in REQUIRED:
+        entity = detect_entity({f for f in fields.values() if f}, headers)
     col_idx = {h: i for i, h in enumerate(headers)}
     n = len(rows)
     raw = [[_s(r[i]) if i < len(r) else "" for i in range(len(headers))] for r in rows]

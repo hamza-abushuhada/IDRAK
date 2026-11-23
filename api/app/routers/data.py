@@ -1,4 +1,3 @@
-import asyncio
 from functools import lru_cache
 import datetime as dt
 import re
@@ -16,7 +15,9 @@ from ..cleaning import engine
 from ..cleaning import parsers as cleaning_parsers
 from ..cleaning.arabic import match_key
 from ..cleaning.context import load_context
-from ..cleaning.fields import ENTITY_LABELS, FIELDS, LABELS, auto_map, detect_entity, kind_of
+from ..cleaning import referee
+from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map, detect_entity,
+                               entity_state, field_signature, kind_of)
 from ..cleaning.io import read_table
 from ..services import ai
 
@@ -28,6 +29,30 @@ def _field_catalog():
     return [{"key": k, "kind": v[0], "en": LABELS[k][0], "ar": LABELS[k][1]} for k, v in FIELDS.items()]
 
 
+async def _ai_referee(ctx: Ctx, headers: list[str], rows: list[list], mapping: dict[str, dict],
+                      skip: set[str]) -> dict[str, dict]:
+    """Let the AI referee the uncertain columns (cleaning/referee.py). Fails open.
+
+    Goes through the org's daily AI budget like the assistant: over the cap, the
+    mapping stays as the rules left it. The call's cost is tracked by ai.track().
+    """
+    if not ai.available() or not referee.candidates(headers, mapping, skip):
+        return mapping
+    if not await ai.budget_reserve(ctx.org_id):
+        return mapping
+    try:
+        return await referee.arbitrate(
+            headers, rows, mapping,
+            lambda judge, decided: ai.map_columns(judge, decided, ctx.org_id, ctx.user.id), skip=skip)
+    finally:
+        await ai.budget_release(ctx.org_id)
+
+
+_BLOCKED = ("Confirm the file type first: Idrak isn't sure what this file is "
+            "(sales, customers, products, supplier prices or a generic table). "
+            "Choose it on the column mapping step, then clean again.")
+
+
 async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "upload", batch_id: str | None = None):
     try:
         headers, rows, sheets = read_table(filename, data)
@@ -35,6 +60,8 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers:
         raise HTTPException(422, "No header row found")
+    if ENTITY_KEY in headers:
+        raise HTTPException(422, f"A column can't be named {ENTITY_KEY}")
     # نمرّر الصفوف: الربط يعتمد على اسم العمود وعلى شكل قيمه معاً، والأعمدة
     # الضعيفة تُعلَّم "review" فيطلب منها الواجهة تأكيداً قبل التنظيف.
     mapping = auto_map(headers, rows)
@@ -62,26 +89,11 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
             mapping[h] = {"field": None, "confidence": 0.0, "source": None}
         elif f:
             seen_fields.add(f)
-    unmapped = [h for h, m in mapping.items() if not m["field"] and h not in explicit_unused]
-    if unmapped:
-        samples = {h: [r[i] for r in rows[:8] if r[i] not in (None, "")] for i, h in enumerate(headers)}
-        # الذكاء الاصطناعي بياخد ثواني (وأحياناً يعلّق) — والرفع كله
-        # واقف عليه. القواعد تغطّي أسماء أنظمة الكاشير الشائعة، فندّيه
-        # مهلة قصيرة: يلحق يجاوب، منيح؛ تأخّر، نكمّل ونخلّي العمود
-        # للمستخدم بدل ما ينتظر بلا نهاية.
-        try:
-            ai_map = await asyncio.wait_for(ai.map_columns(headers, samples, ctx.org_id, ctx.user.id), timeout=6)
-        except Exception:
-            ai_map = None
-        if ai_map:
-            used = {m["field"] for m in mapping.values() if m["field"]}
-            for h in unmapped:
-                f = (ai_map.get(h) or {}).get("field")
-                if f in FIELDS and f not in used:
-                    conf = float((ai_map[h] or {}).get("confidence") or 0.7)
-                    mapping[h] = {"field": f, "confidence": conf, "source": "ai", "reason": ai_map[h].get("reason"),
-                                  "review": conf < 0.8, "evidence": None}
-                    used.add(f)
+    # الذكاء الاصطناعي حَكَم: يُسأل عن الأعمدة الفاضية والمعلّمة "review"
+    # فقط، وما بيغيّر عموداً متأكدين منه (cleaning/referee.py). بياخد ثواني
+    # وأحياناً يعلّق والرفع كله واقف عليه، فمهلته قصيرة؛ تأخّر أو فشل،
+    # نكمّل بالربط كما هو وبنفس علامات المراجعة.
+    mapping = await _ai_referee(ctx, headers, rows, mapping, explicit_unused)
     entity = detect_entity({m["field"] for m in mapping.values() if m["field"]}, headers)
     uid = await db.fetchval("""insert into uploads(org_id,uploaded_by,batch_id,file_name,file_size,source,entity,sheet_name,row_count,column_count,columns,mapping,status)
                                values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'mapped') returning id""",
@@ -329,6 +341,10 @@ async def get_upload(upload_id: str, ctx: Ctx = Depends(require("view_dashboard"
         " from upload_data where upload_id=$1", upload_id)
     u["preview"] = (d["preview"] if d else []) or []
     u["fields"] = _field_catalog()
+    # نوع الملف: المكتشف، أسباب طلب التأكيد، وتأكيد المستخدم إن وُجد.
+    u["entity_check"] = entity_state(u["columns"] or [], u["mapping"])
+    u["mapping"] = {h: m for h, m in (u["mapping"] or {}).items() if h != ENTITY_KEY}
+    u["entities"] = {k: {"en": v[0], "ar": v[1], "needs": NEEDS[k]} for k, v in ENTITY_LABELS.items()}
     u["entity_label"] = ENTITY_LABELS.get(u["entity"], ENTITY_LABELS["unknown"])
     u["last_run_id"] = await db.fetchval("select id from cleaning_runs where upload_id=$1 order by started_at desc limit 1", upload_id)
     return u
@@ -336,16 +352,24 @@ async def get_upload(upload_id: str, ctx: Ctx = Depends(require("view_dashboard"
 
 class MappingIn(BaseModel):
     mapping: dict[str, str | None]
+    # نوع الملف اللي أكّده أو اختاره المستخدم (sales / customers / ...).
+    entity: str | None = None
 
 
 @router.put("/uploads/{upload_id}/mapping")
 async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("upload_data"))):
-    u = await db.fetchrow("select mapping,batch_id from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
+    u = await db.fetchrow("select columns,mapping,batch_id from uploads where id=$1 and org_id=$2", upload_id, ctx.org_id)
     if not u:
         raise HTTPException(404)
+    if m.entity is not None and m.entity not in ENTITIES:
+        raise HTTPException(422, f"Unknown file type: {m.entity}")
+    headers = u["columns"] or []
     cur = u["mapping"] or {}
     learned = []
     for h, f in m.mapping.items():
+        # أعمدة الملف فقط: مفتاح غريب (مثل مفتاح تأكيد النوع) لا يُكتب ولا يُحفظ كقاعدة.
+        if h not in headers:
+            continue
         cur[h] = {**(cur.get(h) or {}), "field": f if f in FIELDS else None, "source": "user", "confidence": 1.0,
                   "review": False, "evidence": None}
         # نحفظ اختيار المستخدم لاسم العمود نفسه، فيرجع يتطبّق تلقائياً
@@ -356,12 +380,17 @@ async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("
             await c.executemany("""insert into cleaning_rules(org_id,column_kind,match_value,replace_value,created_by)
                                    values($1,$2,$3,$4,$5)
                                    on conflict (org_id,column_kind,match_value) do update set replace_value=excluded.replace_value""", learned)
-    entity = detect_entity({v["field"] for v in cur.values() if v.get("field")}, list(cur))
+    if m.entity is not None:
+        # التأكيد مربوط بهذا الربط بالذات: لو تغيّر عمود بعدين، يُطلب من جديد.
+        cur[ENTITY_KEY] = {"entity": m.entity, "fields": field_signature({h: cur.get(h) or {} for h in headers}),
+                           "by": str(ctx.user.id), "at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    state = entity_state(headers, cur)
+    entity = state["entity"]
     await db.execute("update uploads set mapping=$3, entity=$4 where id=$1 and org_id=$2", upload_id, ctx.org_id, cur, entity)
     if u.get("batch_id"):
         report = await _build_batch_report(u["batch_id"], ctx.org_id)
         await db.execute("update import_batches set link_report=$2,updated_at=now() where id=$1", u["batch_id"], report)
-    return {"ok": True, "entity": entity}
+    return {"ok": True, "entity": entity, "entity_check": state}
 
 
 @router.post("/uploads/{upload_id}/clean")
@@ -376,13 +405,19 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     if len(d["raw_rows"]) > 120000:
         raise HTTPException(413, f"This file has {len(d['raw_rows']):,} rows. Idrak cleans up to 120,000 rows per file — "
                                  f"split it by month (e.g. one file per month) and upload them separately.")
-    mapping = {h: (u["mapping"].get(h) or {}).get("field") for h in headers}
+    # نوع ملف غير مؤكَّد (مشتريات بشكل مبيعات، سجل هدر، أعمدة ناقصة...) لا
+    # يُنظَّف حتى يؤكّده المستخدم. الواجهة تمنع الزر، وهذا يمنع أي مسار آخر.
+    state = entity_state(headers, u["mapping"])
+    if state["blocked"]:
+        raise HTTPException(409, _BLOCKED)
+    mapping = {h: ((u["mapping"] or {}).get(h) or {}).get("field") for h in headers}
     ctxk = await load_context(ctx.org_id)
     contract = {}
     if u.get("batch_id"):
         contract = await db.fetchval("select contract from import_batches where id=$1 and org_id=$2", u["batch_id"], ctx.org_id) or {}
     res = engine.run(headers, d["raw_rows"], mapping, ctxk,
-                     price_unit=contract.get("price_unit", "jd"), date_order=contract.get("date_order", "auto"))
+                     price_unit=contract.get("price_unit", "jd"), date_order=contract.get("date_order", "auto"),
+                     entity=state["entity"])
     memory_hits = sum(1 for c in res["changes"] if c["rule"] == "memory")
     # الصنف غير الموجود ليس سبباً لتخطّي الصف: الاستيراد ينشئه.
     # كان هنا فكانت كل صفوف ملف فيه أصناف جديدة تُتخطّى.
@@ -415,6 +450,7 @@ async def get_run(run_id: str, ctx: Ctx = Depends(require("view_dashboard"))):
                              where r.id=$1 and r.org_id=$2""", run_id, ctx.org_id)
     if not r:
         raise HTTPException(404, "Run not found")
+    r["mapping"] = {h: m for h, m in (r["mapping"] or {}).items() if h != ENTITY_KEY}
     counts = await db.fetch("select rule, status, count(*) n from cleaning_changes where run_id=$1 group by 1,2", run_id)
     by_rule = defaultdict(lambda: {"proposed": 0, "approved": 0, "rejected": 0, "reverted": 0})
     for c in counts:
@@ -591,6 +627,12 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         raise HTTPException(404)
     if run["imported_at"] and not run["reverted_at"]:
         raise HTTPException(409, "Already imported")
+    # نفس حارس clean: تشغيلات قديمة (قبل هذا الحارس) أو ربط تغيّر بعد التنظيف.
+    if entity_state(run["columns"] or [], run["mapping"])["blocked"]:
+        raise HTTPException(409, _BLOCKED)
+    cleaned_as = (run["stats"] or {}).get("entity")
+    if cleaned_as and cleaned_as != run["entity"]:
+        raise HTTPException(409, "The file type changed after this file was cleaned. Clean it again before importing.")
     d = await db.fetchrow("select raw_rows from upload_data where upload_id=$1", run["upload_id"])
     changes = await db.fetch("select * from cleaning_changes where run_id=$1", run_id)
     headers = run["columns"]
