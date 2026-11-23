@@ -35,7 +35,9 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers:
         raise HTTPException(422, "No header row found")
-    mapping = auto_map(headers)
+    # نمرّر الصفوف: الربط يعتمد على اسم العمود وعلى شكل قيمه معاً، والأعمدة
+    # الضعيفة تُعلَّم "review" فيطلب منها الواجهة تأكيداً قبل التنظيف.
+    mapping = auto_map(headers, rows)
     # ربط الأعمدة اللي عدّله المستخدم قبل تنحفظ كقواعد، فملف الشهر الجاي
     # من نفس نظام الكاشير بينربط لحاله. القيمة الفاضية = "لا تستخدم"
     # صراحةً، فما نخلّي الذكاء الاصطناعي يرجّعها.
@@ -76,7 +78,9 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
             for h in unmapped:
                 f = (ai_map.get(h) or {}).get("field")
                 if f in FIELDS and f not in used:
-                    mapping[h] = {"field": f, "confidence": float((ai_map[h] or {}).get("confidence") or 0.7), "source": "ai", "reason": ai_map[h].get("reason")}
+                    conf = float((ai_map[h] or {}).get("confidence") or 0.7)
+                    mapping[h] = {"field": f, "confidence": conf, "source": "ai", "reason": ai_map[h].get("reason"),
+                                  "review": conf < 0.8, "evidence": None}
                     used.add(f)
     entity = detect_entity({m["field"] for m in mapping.values() if m["field"]}, headers)
     uid = await db.fetchval("""insert into uploads(org_id,uploaded_by,batch_id,file_name,file_size,source,entity,sheet_name,row_count,column_count,columns,mapping,status)
@@ -342,7 +346,8 @@ async def set_mapping(upload_id: str, m: MappingIn, ctx: Ctx = Depends(require("
     cur = u["mapping"] or {}
     learned = []
     for h, f in m.mapping.items():
-        cur[h] = {**(cur.get(h) or {}), "field": f if f in FIELDS else None, "source": "user", "confidence": 1.0}
+        cur[h] = {**(cur.get(h) or {}), "field": f if f in FIELDS else None, "source": "user", "confidence": 1.0,
+                  "review": False, "evidence": None}
         # نحفظ اختيار المستخدم لاسم العمود نفسه، فيرجع يتطبّق تلقائياً
         # على كل ملف جاي من نفس نظام الكاشير.
         learned.append((ctx.org_id, "column", h, f if f in FIELDS else "", ctx.user.id))

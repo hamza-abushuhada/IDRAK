@@ -77,7 +77,7 @@ async def health_check(file: UploadFile = File(...)):
     if not headers or not rows:
         raise HTTPException(422, "The file looks empty")
     rows = rows[:1000]
-    mapping = {h: m["field"] for h, m in auto_map(headers).items()}
+    mapping = {h: m["field"] for h, m in auto_map(headers, rows).items()}
     res = engine.run(headers, rows, mapping)
     await db.execute("insert into health_checks(file_name,row_count,score) values($1,$2,$3)", file.filename, len(rows), res["score_before"]["score"])
     return {

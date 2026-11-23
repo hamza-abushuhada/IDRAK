@@ -124,5 +124,92 @@ class NoRegressions(unittest.TestCase):
         self.assertEqual(detect_entity({"supplier", "product", "carton_price"}), "supplier_prices")
 
 
+def _ean13(body12: str) -> str:
+    # Independent of profile._gtin_ok: weights counted from the left (1,3,1,3…).
+    s = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(body12))
+    return body12 + str((10 - s % 10) % 10)
+
+
+PHONES = ["+962 79 100 1601", "0791234567", "00962781790528", "962772437391", "+962-77-927-5018",
+          "0785551234", "+962 79 584 7321", "0771112233"]
+TIMES = ["19:26", "17:32", "23:33", "21:37", "08:05", "12:00", "14:45", "10:10"]
+PAYMENTS = ["كاش", "CLIQ", "نقدي", "visa", "كاش", "محفظة", "cash", "كليك"]
+DATES = ["08/02/2026", "18/10/2025", "2025-12-26", "03/21/2025", "12-11-26", "2026-01-05", "15/03/2026", "2026-02-11"]
+ITEMS = ["شاورما دجاج", "فلافل", "حمص", "برجر", "سلطة سيزر", "بطاطا", "متبل", "كنافة"]
+
+
+def _rows(*cols):
+    return [list(r) for r in zip(*cols)]
+
+
+class ValueEvidence(unittest.TestCase):
+    """The values are a second witness next to the header (profile.py)."""
+
+    def test_unknown_headers_are_recovered_from_values_and_flagged(self):
+        m = auto_map(["A", "B", "C", "D"], _rows(ITEMS, PHONES, TIMES, PAYMENTS))
+        self.assertEqual([m[h]["field"] for h in "BCD"], ["phone", "sale_time", "payment_method"])
+        for h in "BCD":
+            self.assertTrue(m[h]["review"], h)
+            self.assertEqual(m[h]["source"], "values")
+            self.assertEqual(m[h]["evidence"]["type"], "discovered")
+
+    def test_mislabelled_columns_are_corrected(self):
+        h = ["رقم الفاتورة", "يوم العملية", "التاريخ", "الصنف", "الكمية", "اسم العميل"]
+        m = auto_map(h, _rows([str(50000 + i) for i in range(8)], DATES, TIMES, ITEMS, ["1"] * 8, PHONES))
+        self.assertEqual(m["التاريخ"]["field"], "sale_time")      # a "date" column full of times
+        self.assertEqual(m["يوم العملية"]["field"], "date")       # the real dates, found from values
+        self.assertEqual(m["اسم العميل"]["field"], "phone")       # a "name" column full of phones
+        self.assertTrue(all(m[x]["review"] for x in ("التاريخ", "يوم العملية", "اسم العميل")))
+
+    def test_header_contradicted_by_values_is_flagged_not_trusted(self):
+        m = auto_map(["Phone", "Qty"], _rows(ITEMS, ["1"] * 8))
+        self.assertEqual(m["Phone"]["field"], "phone")
+        self.assertTrue(m["Phone"]["review"])
+        self.assertEqual(m["Phone"]["evidence"]["type"], "mismatch")
+
+    def test_partly_unknown_payment_methods_ask_for_review(self):
+        m = auto_map(["طريقة الدفع"], [["شيك"], ["كاش"], ["شيك"], ["CLIQ"], ["شيك مؤجل"], ["كاش"], ["شيك"], ["نقدي"]])
+        self.assertTrue(m["طريقة الدفع"]["review"])
+
+    def test_clean_well_named_file_needs_no_review(self):
+        h = ["Invoice No", "Date", "Item", "Qty", "Total", "Payment Method"]
+        m = auto_map(h, _rows([str(i) for i in range(8)], DATES, ITEMS, ["2"] * 8, ["3.5"] * 8, PAYMENTS))
+        self.assertEqual([x for x in h if m[x]["review"]], [])
+
+    def test_order_numbers_are_not_mistaken_for_dates_or_phones(self):
+        # 5-digit ids parse as Excel serial dates; 8-digit ids parse as landlines.
+        m = auto_map(["رقم الطلب", "Ref", "Ref2"],
+                     _rows([str(50001 + i) for i in range(8)], [str(50001 + i) for i in range(8)],
+                           [str(50001234 + i) for i in range(8)]))
+        self.assertIsNone(m["Ref"]["field"])
+        self.assertIsNone(m["Ref2"]["field"])
+
+    def test_catalog_does_not_gain_a_date_and_become_sales(self):
+        h = ["Item", "Qty", "X"]
+        m = auto_map(h, _rows(ITEMS, ["5"] * 8, DATES))
+        self.assertIsNone(m["X"]["field"])
+        self.assertNotEqual(detect_entity({v["field"] for v in m.values() if v["field"]}, h), "sales")
+
+    CODES = [_ean13(b) for b in ("400638133393", "590123412345", "978030640615", "625100000001",
+                                 "625100000002", "625100000003", "625100000004", "625100000005")]
+
+    def test_barcodes_found_by_check_digit(self):
+        m = auto_map(["Item", "Ref"], _rows(ITEMS, self.CODES))
+        self.assertEqual(m["Ref"]["field"], "barcode")
+        self.assertTrue(m["Ref"]["review"])
+
+    def test_code_column_holding_barcodes_becomes_barcode(self):
+        m = auto_map(["Item", "Code"], _rows(ITEMS, self.CODES))
+        self.assertEqual(m["Code"]["field"], "barcode")
+
+    def test_code_column_holding_item_codes_stays_sku(self):
+        m = auto_map(["Item", "Code"], _rows(ITEMS, [f"REST-01{i:02d}" for i in range(8)]))
+        self.assertEqual(m["Code"]["field"], "sku")
+        self.assertFalse(m["Code"]["review"])
+
+    def test_without_rows_the_result_keeps_its_old_shape(self):
+        self.assertNotIn("review", auto_map(["Date", "Item"])["Date"])
+
+
 if __name__ == "__main__":
     unittest.main()

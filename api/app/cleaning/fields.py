@@ -105,7 +105,17 @@ def _is_time_header(header: str) -> bool:
     return bool(set(match_key(str(header or "").replace("_", " ")).split()) & _TIME_WORDS)
 
 
-def auto_map(headers: list[str]) -> dict[str, dict]:
+def auto_map(headers: list[str], rows: list[list] | None = None) -> dict[str, dict]:
+    """Map headers to fields. With rows, the values are checked too (see profile.py):
+    each entry then also carries "review" and "evidence"."""
+    names = _map_by_name(headers)
+    if rows is None:
+        return names
+    from .profile import refine_with_values  # profile imports this module
+    return refine_with_values(headers, rows, names)
+
+
+def _map_by_name(headers: list[str]) -> dict[str, dict]:
     guesses = {h: guess_field(h) for h in headers}
     # نوزّع الحقول بالأقوى أولاً (التامّة قبل التقريبية) حتى لا يحجز عمود
     # تقريبي ("حالة الدفع") حقلاً يطابقه عمود آخر تماماً ("طريقة الدفع").
