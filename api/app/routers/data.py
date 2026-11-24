@@ -7,7 +7,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from .. import db
@@ -19,7 +19,7 @@ from ..cleaning.context import KIND_ALIAS, load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
                                entity_state, field_signature, kind_of, remembered_entity)
-from ..cleaning.io import read_table
+from ..cleaning.io import MAX_BYTES, MAX_ROWS, TooLarge, TooManyRows, gunzip, read_table
 from ..services import ai
 
 router = APIRouter(prefix="/data", tags=["data"])
@@ -146,9 +146,19 @@ _BLOCKED = ("Confirm the file type first: Idrak isn't sure what this file is "
             "Choose it on the column mapping step, then clean again.")
 
 
+def _too_big(e: Exception) -> HTTPException:
+    if isinstance(e, TooManyRows):
+        return HTTPException(413, {"en": f"This file has {e.rows:,} rows. Idrak takes up to {MAX_ROWS:,} rows per file.",
+                                   "ar": f"الملف فيه {e.rows:,} صف، وإدراك بياخد لحد {MAX_ROWS:,} صف بالملف الواحد."})
+    mb = MAX_BYTES // (1024 * 1024)
+    return HTTPException(413, {"en": f"This file is larger than {mb} MB.", "ar": f"الملف أكبر من {mb} ميغا."})
+
+
 async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "upload", batch_id: str | None = None):
     try:
         headers, rows, sheets = read_table(filename, data)
+    except (TooManyRows, TooLarge) as e:
+        raise _too_big(e) from e
     except Exception as e:
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers:
@@ -227,6 +237,59 @@ async def upload(file: UploadFile = File(...), ctx: Ctx = Depends(require("uploa
     if len(data) > 4 * 1024 * 1024:
         raise HTTPException(413, "File too large for direct upload (max 4MB)")
     return await _create_upload(ctx, file.filename or "upload.csv", data)
+
+
+# ── Large files: sent in parts ────────────────────────────────────────────────
+# Vercel refuses any request over 4.5 MB before it reaches the API, and the browser
+# showed that as "network". The site gzips the file, sends it in parts of up to
+# 4 MB (one request each, kept in upload_parts), then asks to finish: the parts
+# are joined, unpacked and uploaded like any other file.
+PART_BYTES = 4 * 1024 * 1024
+MAX_PARTS = 64
+
+
+@router.post("/transfers/{transfer_id}/parts/{seq}")
+async def upload_part(transfer_id: uuid.UUID, seq: int, request: Request, ctx: Ctx = Depends(require("upload_data"))):
+    if not 0 <= seq < MAX_PARTS:
+        raise HTTPException(413, {"en": "This file is too large.", "ar": "الملف كبير كثير."})
+    data = await request.body()
+    if not data or len(data) > PART_BYTES:
+        raise HTTPException(413, "Each part must be 1 byte to 4 MB")
+    if seq == 0:  # parts of uploads that never finished
+        await db.execute("delete from upload_parts where created_at < now() - interval '1 day'")
+    await db.execute("""insert into upload_parts(transfer_id, seq, org_id, data) values($1,$2,$3,$4)
+                        on conflict (transfer_id, seq) do update set data=excluded.data, created_at=now()
+                        where upload_parts.org_id=excluded.org_id""", transfer_id, seq, ctx.org_id, data)
+    return {"ok": True}
+
+
+class FinishIn(BaseModel):
+    file_name: str
+    parts: int
+    batch_id: str | None = None
+
+
+@router.post("/transfers/{transfer_id}/finish")
+async def finish_transfer(transfer_id: uuid.UUID, body: FinishIn, ctx: Ctx = Depends(require("upload_data"))):
+    recs = await db.fetch("select seq, data from upload_parts where transfer_id=$1 and org_id=$2 order by seq",
+                          transfer_id, ctx.org_id)
+    if not 0 < body.parts <= MAX_PARTS or [r["seq"] for r in recs] != list(range(body.parts)):
+        raise HTTPException(409, {"en": "Part of the file didn't arrive. Upload it again.",
+                                  "ar": "جزء من الملف ما وصل. ارفعه مرة ثانية."})
+    data = b"".join(bytes(r["data"]) for r in recs)
+    del recs
+    await db.execute("delete from upload_parts where transfer_id=$1 and org_id=$2", transfer_id, ctx.org_id)
+    if data[:2] == bytes((0x1F, 0x8B)):  # gzipped by the browser
+        try:
+            data = gunzip(data)
+        except TooLarge as e:
+            raise _too_big(e) from e
+        except Exception as e:
+            raise HTTPException(422, "The file arrived damaged. Upload it again.") from e
+    name = (body.file_name or "").strip()[:200] or "upload"
+    if body.batch_id:
+        return await _add_batch_file(ctx, body.batch_id, name, data)
+    return await _create_upload(ctx, name, data)
 
 
 def _column_values(upload: dict, field: str) -> list[str]:
@@ -338,17 +401,19 @@ async def create_batch(ctx: Ctx = Depends(require("upload_data"))):
 
 @router.post("/batches/{batch_id}/files")
 async def add_batch_file(batch_id: str, file: UploadFile = File(...), ctx: Ctx = Depends(require("upload_data"))):
+    name, data = file.filename or "upload.csv", await file.read()
+    if len(data) > 4 * 1024 * 1024:
+        raise HTTPException(413, "File too large for direct upload (max 4MB)")
+    return await _add_batch_file(ctx, batch_id, name, data)
+
+
+async def _add_batch_file(ctx: Ctx, batch_id: str, name: str, data: bytes):
     batch = await db.fetchrow("select status from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     if not batch:
         raise HTTPException(404, "Import batch not found")
     count = await db.fetchval("select count(*) from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)
     if count >= 8:
         raise HTTPException(422, "A batch supports up to 8 files")
-    name, data = file.filename or "upload.csv", await file.read()
-    if not name.lower().endswith((".csv", ".txt", ".xlsx", ".xlsm")):
-        raise HTTPException(422, "Batch supports CSV, TXT, XLSX and XLSM files")
-    if len(data) > 4 * 1024 * 1024:
-        raise HTTPException(413, "File too large for direct upload (max 4MB)")
     uploaded = await _create_upload(ctx, name, data, source="batch", batch_id=batch_id)
     report = await _build_batch_report(batch_id, ctx.org_id)
     await db.execute("update import_batches set link_report=$2,updated_at=now() where id=$1", batch_id, report)
@@ -518,8 +583,8 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     headers = u["columns"]
     # التنظيف يعمل داخل الطلب. الملفات الكبيرة جداً تتجاوز مهلة الاستضافة
     # فيقطع الاتصال برسالة "network" بلا تفسير. نرفض بلطف ونطلب التقسيم.
-    if len(d["raw_rows"]) > 120000:
-        raise HTTPException(413, f"This file has {len(d['raw_rows']):,} rows. Idrak cleans up to 120,000 rows per file — "
+    if len(d["raw_rows"]) > MAX_ROWS:
+        raise HTTPException(413, f"This file has {len(d['raw_rows']):,} rows. Idrak cleans up to {MAX_ROWS:,} rows per file — "
                                  f"split it by month (e.g. one file per month) and upload them separately.")
     # نوع ملف غير مؤكَّد (مشتريات بشكل مبيعات، سجل هدر، أعمدة ناقصة...) لا
     # يُنظَّف حتى يؤكّده المستخدم. الواجهة تمنع الزر، وهذا يمنع أي مسار آخر.
@@ -541,6 +606,10 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     stats = {"rows_before": res["rows_before"], "rows_after": res["rows_after"], "issues": res["issues"], "clusters": res["clusters"],
              "flags": res["flags"][:500], "flag_count": len(res["flags"]),
              "blocking_flags": blocking_flags[:500], "blocking_flag_count": len(blocking_flags),
+             # Every blocked cell, for the import. blocking_flags is cut at 500 for the
+             # screen, and a big file's 501st future-dated row used to get imported.
+             # Left out of what get_run sends (_HIDDEN_STATS).
+             "blocking_all": [[f["row"], f["column"], f["reason"]] for f in blocking_flags],
              "entity": res["entity"], "memory_hits": memory_hits,
              "removed_rows": res["removed_rows"]}
     async with db.transaction() as c:
@@ -560,6 +629,11 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     return await get_run(str(run_id), ctx)
 
 
+# Kept on the run for the import, never sent: on a big file it outgrew what a
+# response may carry (Vercel stops at 4.5 MB).
+_HIDDEN_STATS = ("blocking_all",)
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, ctx: Ctx = Depends(require("view_dashboard"))):
     r = await db.fetchrow("""select r.*, u.file_name, u.columns, u.mapping, u.row_count, u.entity from cleaning_runs r join uploads u on u.id=r.upload_id
@@ -567,6 +641,8 @@ async def get_run(run_id: str, ctx: Ctx = Depends(require("view_dashboard"))):
     if not r:
         raise HTTPException(404, "Run not found")
     r["mapping"] = {h: m for h, m in (r["mapping"] or {}).items() if h != ENTITY_KEY}
+    if r["stats"]:
+        r["stats"] = {k: v for k, v in r["stats"].items() if k not in _HIDDEN_STATS}
     counts = await db.fetch("select rule, status, count(*) n from cleaning_changes where run_id=$1 group by 1,2", run_id)
     by_rule = defaultdict(lambda: {"proposed": 0, "approved": 0, "rejected": 0, "reverted": 0})
     for c in counts:
@@ -599,20 +675,32 @@ async def run_grid(run_id: str, offset: int = 0, limit: int = 100, only_changed:
     r = await db.fetchrow("select r.upload_id, r.stats, u.columns from cleaning_runs r join uploads u on u.id=r.upload_id where r.id=$1 and r.org_id=$2", run_id, ctx.org_id)
     if not r:
         raise HTTPException(404)
-    d = await db.fetchrow("select raw_rows from upload_data where upload_id=$1", r["upload_id"])
-    raw = d["raw_rows"]
-    ch = await db.fetch("select id,row_index,column_name,old_value,new_value,rule,status,confidence from cleaning_changes where run_id=$1", run_id)
+    # Only the page's rows and their changes. It loaded the whole file and every
+    # change for each page: 99,000 rows and 318,000 changes to show 60 rows.
+    offset, limit = max(0, int(offset)), max(1, min(int(limit), 200))
+    if only_changed:
+        total = await db.fetchval("select count(distinct row_index) from cleaning_changes where run_id=$1", run_id)
+        idxs = [x["row_index"] for x in await db.fetch(
+            "select distinct row_index from cleaning_changes where run_id=$1 order by 1 offset $2 limit $3",
+            run_id, offset, limit)]
+    else:
+        total = await db.fetchval("select jsonb_array_length(raw_rows) from upload_data where upload_id=$1",
+                                  r["upload_id"]) or 0
+        idxs = list(range(offset, min(offset + limit, total)))
+    raw = {x["i"]: x["e"] for x in await db.fetch(
+        """select (t.ord - 1)::int i, t.e from upload_data d, jsonb_array_elements(d.raw_rows) with ordinality t(e, ord)
+           where d.upload_id=$1 and t.ord - 1 = any($2::bigint[])""", r["upload_id"], idxs)} if idxs else {}
+    ch = await db.fetch("""select id,row_index,column_name,old_value,new_value,rule,status,confidence from cleaning_changes
+                           where run_id=$1 and row_index = any($2::int[])""", run_id, idxs) if idxs else []
     by_row = defaultdict(dict)
     for c in ch:
         by_row[c["row_index"]][c["column_name"]] = c
     flags = defaultdict(dict)
     for f in (r["stats"] or {}).get("flags", []):
         flags[f["row"]][f["column"]] = f["reason"]
-    idxs = sorted(by_row) if only_changed else list(range(len(raw)))
-    total = len(idxs)
     out = []
-    for i in idxs[offset: offset + limit]:
-        row = raw[i]
+    for i in idxs:
+        row = raw.get(i) or []
         cells = []
         for ci, h in enumerate(r["columns"]):
             c = by_row[i].get(h)
@@ -817,7 +905,12 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         def field_of(col):
             return ((run["mapping"] or {}).get(col) or {}).get("field")
 
-        for f in (run["stats"] or {}).get("blocking_flags", []):
+        stats0 = run["stats"] or {}
+        if "blocking_all" in stats0:
+            every = [{"row": r_, "column": c_, "reason": why} for r_, c_, why in stats0["blocking_all"]]
+        else:  # runs cleaned before the full list was kept
+            every = stats0.get("blocking_flags", [])
+        for f in every:
             if (f.get("row"), f.get("column")) in approved_cells:
                 continue
             if not _blocks(f, field_of):  # runs cleaned before these rules stored more flags
@@ -836,14 +929,33 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
              "products_no_cost": 0}
     # لو الملف ما فيه عمود تكلفة، لا نرمي الصفوف: ننشئ الصنف بتكلفة 0
     # ونعدّها، وننبّه إن الربح ما بينحسب إلا بعد ما تُدخل التكاليف.
-    has_cost_col = "cost" in fmap
+    has_product_col = "product" in fmap
+
+    def item_name(r):
+        # A file of sales by category has no item column: the category is the item.
+        return g(r, "product") if has_product_col else g(r, "category")
+
+    def row_cost(r):
+        """A unit's cost: the cost column, else worked out from the line's profit."""
+        cost = _num(g(r, "cost"))
+        if cost is not None or "profit" not in fmap:
+            return cost
+        q, profit = _num(g(r, "quantity")), _num(g(r, "profit"))
+        if not q or q <= 0 or profit is None:
+            return None
+        p, t = _num(g(r, "unit_price")), _num(g(r, "total"))
+        line = t if t is not None else (p * q if p is not None else None)
+        if line is None or line - profit < 0:
+            return None
+        return (line - profit) / q
+
     # A product's cost from all its rows in this file. A new product whose row had
     # no cost ("غير محدد") dropped that row, though its other rows had one.
     file_costs: dict[str, Decimal] = {}
-    if has_cost_col:
+    if "cost" in fmap or "profit" in fmap:
         by_name: dict[str, list[Decimal]] = defaultdict(list)
         for r in rows:
-            nm, cv = g(r, "product"), _money(g(r, "cost"))
+            nm, cv = item_name(r), _money(row_cost(r))
             if nm and cv is not None and cv >= 0:
                 by_name[match_key(nm)].append(cv)
         file_costs = {k: sorted(v)[len(v) // 2] for k, v in by_name.items()}
@@ -1100,11 +1212,11 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     ret_items, ret_total = [], Decimal("0")
                     disc_lines, has_pct = Decimal("0"), False
                     for _ri, r in lines:
-                        name = g(r, "product")
+                        name = item_name(r)
                         q = _num(g(r, "quantity"))
                         p = _num(g(r, "unit_price"))
                         t = _num(g(r, "total"))
-                        cost = _num(g(r, "cost"))
+                        cost = row_cost(r)
                         if name and q is not None and -200 <= q < 0:
                             # A negative quantity is a return. It used to be dropped (and its
                             # value read from the raw total, fils and all: "183,155 JD").

@@ -15,10 +15,17 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+// رسالة بلغتين من الـ API ({en, ar}): بنعرض لغة الصفحة.
+export function inPageLanguage(m: { en: string; ar: string }): string {
+  const ar = typeof document !== "undefined" && document.documentElement.lang.startsWith("ar");
+  return ar ? m.ar : m.en;
+}
+
 // استخراج موحّد لرسالة الخطأ من استجابة فاشلة (كان مكرّراً في 4 دوال).
 async function errorFromResponse(res: Response): Promise<ApiError> {
   let msg: unknown = res.statusText;
   try { const j = await res.json(); msg = j.detail || msg; } catch {}
+  if (msg && typeof msg === "object" && "en" in msg && "ar" in msg) msg = inPageLanguage(msg as { en: string; ar: string });
   return new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
 }
 

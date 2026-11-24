@@ -5,6 +5,7 @@ import clsx from "clsx";
 import { AlertTriangle, FileSpreadsheet, Link2, Trash2, Brain, Download, Files } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { api } from "@/lib/api";
+import { MAX_FILE_MB, sendFile } from "@/lib/upload";
 import { useApiMutation, useApiQuery } from "@/lib/useApi";
 import { useQueryClient } from "@tanstack/react-query";
 import { date, timeAgo } from "@/lib/format";
@@ -62,9 +63,8 @@ export default function DataHub() {
     if (!can("manager")) return toast(tx("Managers and owners can upload data", "رفع البيانات للمدير والمالك بس"), undefined, "info");
     setBusy(f.name);
     try {
-      const fd = new FormData();
-      fd.append("file", f);
-      const u = await api<{ id: string }>("/data/uploads", { method: "POST", body: fd });
+      // Any size: sent in parts (lib/upload.ts). A file over 4.5 MB used to fail as "network".
+      const u = await sendFile<{ id: string }>(f, { onProgress: (pct) => setBusy(pct < 100 ? `${f.name} · ${pct}%` : f.name) });
       router.push(`/${locale}/app/data/uploads/${u.id}`);
     } catch (e) {
       toast(tx("Upload failed", "فشل الرفع"), (e as Error).message, "error");
@@ -74,15 +74,14 @@ export default function DataHub() {
   async function uploadBatch(selected: File[]) {
     if (!can("manager")) return toast(tx("Managers and owners can upload data", "رفع البيانات للمدير والمالك بس"), undefined, "info");
     if (selected.length > 8) return toast(tx("Choose up to 8 files", "اختار لحد 8 ملفات"), undefined, "error");
-    if (selected.some((file) => file.size > 4 * 1024 * 1024)) return toast(tx("Each file must be 4 MB or smaller", "كل ملف لازم يكون 4 ميغا أو أقل"), undefined, "error");
+    if (selected.some((file) => file.size > MAX_FILE_MB * 1024 * 1024)) return toast(tx(`Each file must be ${MAX_FILE_MB} MB or smaller`, `كل ملف لازم يكون ${MAX_FILE_MB} ميغا أو أقل`), undefined, "error");
     setBusy(`0/${selected.length}`);
     try {
       const batch = await api<{ id: string }>("/data/batches", { method: "POST" });
       for (let i = 0; i < selected.length; i += 1) {
-        setBusy(`${i + 1}/${selected.length} · ${selected[i].name}`);
-        const fd = new FormData();
-        fd.append("file", selected[i]);
-        await api(`/data/batches/${batch.id}/files`, { method: "POST", body: fd });
+        const label = `${i + 1}/${selected.length} · ${selected[i].name}`;
+        setBusy(label);
+        await sendFile(selected[i], { batchId: batch.id, onProgress: (pct) => setBusy(pct < 100 ? `${label} · ${pct}%` : label) });
       }
       await api(`/data/batches/${batch.id}/finalize`, { method: "POST" });
       router.push(`/${locale}/app/data/batches/${batch.id}`);
@@ -127,14 +126,14 @@ export default function DataHub() {
           onClick={() => !busy && fileRef.current?.click()}
           className={clsx("grain flex cursor-pointer flex-col items-center justify-center rounded-[var(--radius-card)] border-2 border-dashed px-6 py-14 text-center transition",
             drag ? "border-terra bg-terra-soft/40" : "border-sand-2 bg-[#FFFCF7] hover:border-terra/50")}>
-          <input ref={fileRef} type="file" multiple accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => chooseFiles(e.target.files)} />
+          <input ref={fileRef} type="file" multiple accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt" className="hidden" onChange={(e) => chooseFiles(e.target.files)} />
           {busy && busy !== "sheet" ? (
             <><Spinner size={28} /><p className="mt-4 font-serif text-lg text-ink">{tx("Reading", "عم نقرأ")} {busy}…</p><p className="mt-1 text-sm text-ink-3">{tx("Detecting columns (Arabic & English) and mapping them with AI", "عم نكتشف الأعمدة (عربي وإنجليزي) ونربطها بالذكاء الاصطناعي")}</p></>
           ) : (
             <>
               <span className="grid size-14 place-items-center rounded-full bg-terra-soft text-terra"><Files size={26} /></span>
               <p className="mt-4 font-serif text-[22px] text-ink">{tx("Drop one file or a related batch", "اسحب ملف واحد أو مجموعة ملفات مرتبطة")}</p>
-              <p className="mt-1 text-sm text-ink-3">{tx("Choose up to 8 files · 4 MB each · Idrak links shared data before import", "اختار لحد 8 ملفات · 4 ميغا للملف · إدراك بيربط البيانات المشتركة قبل الاستيراد")}</p>
+              <p className="mt-1 text-sm text-ink-3">{tx(`Up to 8 files · ${MAX_FILE_MB} MB and 150,000 rows each · Idrak links shared data before import`, `لحد 8 ملفات · ${MAX_FILE_MB} ميغا و150 ألف صف للملف · إدراك بيربط البيانات المشتركة قبل الاستيراد`)}</p>
             </>
           )}
         </div>

@@ -3,8 +3,7 @@
   "regions": ["sin1"],
   "functions": {
     "index.py": {
-      "maxDuration": 60,
-      "memory": 1024
+      "maxDuration": 300
     }
   }
 }

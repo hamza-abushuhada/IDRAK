@@ -12,7 +12,7 @@ import { Badge, Button, Select, Skeleton } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 
 // ما يقوله شكل القيم عن العمود (api/app/cleaning/profile.py).
-type Evidence = { type: "mismatch" | "discovered"; kind: string; share: number };
+type Evidence = { type: "mismatch" | "discovered" | "line_total"; kind: string; share: number };
 // رأي الذكاء الاصطناعي كحَكَم (api/app/cleaning/referee.py): يوافق أو يقترح حقلاً آخر.
 type AiVerdict = { field: string | null; confidence: number; reason: string; agrees: boolean; taken_by?: string };
 // لماذا نوع الملف يحتاج تأكيد (api/app/cleaning/fields.py: entity_check).
@@ -153,6 +153,9 @@ export default function MappingPage() {
   const pending = u ? u.columns.filter((c) => u.mapping[c]?.review && !confirmed[c]
     && (mapping[c] ?? null) === (u.mapping[c]?.field ?? null)) : [];
   const why = (e: Evidence) => {
+    // "Unit price" that grows with the quantity (5 × 300.08 = 1500.40): read as the line total.
+    if (e.type === "line_total") return tx("Grows with the quantity, so it's the line total, not the unit price",
+      "بيكبر مع الكمية، يعني هو إجمالي السطر مش سعر الحبة");
     const [en, ar] = KINDS[e.kind] ?? [e.kind, e.kind];
     const pct = Math.round(e.share * 100);
     return e.type === "discovered"
