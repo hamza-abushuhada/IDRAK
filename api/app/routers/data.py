@@ -18,7 +18,7 @@ from ..cleaning.arabic import match_key, place_key
 from ..cleaning.context import KIND_ALIAS, load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
-                               entity_state, field_signature, kind_of)
+                               entity_state, field_signature, kind_of, remembered_entity)
 from ..cleaning.io import read_table
 from ..services import ai
 
@@ -104,6 +104,25 @@ async def _load_file_memory(org_id: str, headers: list[str]) -> dict | None:
         return None
 
 
+async def _forget_file_memory(org_id: str, column_lists: list[list[str]]) -> None:
+    """Forget the remembered format of deleted files, unless another upload still has those columns.
+
+    Deleting a file and uploading it again brought back the type confirmed the first
+    time, even when that first choice was the wrong one.
+    """
+    try:
+        gone = {fp for cols in column_lists if (fp := learning.fingerprint(cols or []))}
+        if not gone:
+            return
+        for r in await db.fetch("select columns from uploads where org_id=$1", org_id):
+            gone.discard(learning.fingerprint(r["columns"] or []))
+        if gone:
+            await db.execute("delete from mapping_fingerprints where org_id=$1 and fingerprint = any($2::text[])",
+                             org_id, list(gone))
+    except Exception:
+        log.warning("file memory not forgotten", exc_info=True)
+
+
 async def _remember_file(ctx: Ctx, headers: list[str], rows: list[list], mapping: dict, state: dict) -> None:
     """Save this file's confirmed mapping and type under its fingerprint (cleaning/learning.py)."""
     try:
@@ -186,7 +205,7 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
     # نوع الملف المؤكَّد على آخر ملف بنفس الأعمدة بينتقل، بس إذا ولا عمود
     # رجع للمراجعة وكل عمود محافظ على حقله (نفس قاعدة field_signature).
     if from_file and (carried := learning.carried_entity(headers, mapping, saved)):
-        mapping[ENTITY_KEY] = carried
+        mapping[ENTITY_KEY] = remembered_entity(headers, mapping, carried)
     entity = entity_state(headers, mapping)["entity"]
     uid = await db.fetchval("""insert into uploads(org_id,uploaded_by,batch_id,file_name,file_size,source,entity,sheet_name,row_count,column_count,columns,mapping,status)
                                values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'mapped') returning id""",
@@ -1403,6 +1422,7 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
             if not left:
                 await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     db.cache_clear()
+    await _forget_file_memory(ctx.org_id, [exists["columns"] or []])
     counts = {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n),
               "branches": _rowcount(br_n), "employees": _rowcount(emp_n), "categories": _rowcount(cat_n)}
     await db.audit(ctx.org_id, ctx.user.id, "upload.deleted", "upload", upload_id, counts)
@@ -1415,7 +1435,8 @@ async def delete_batch(batch_id: str, ctx: Ctx = Depends(require("upload_data"))
     b = await db.fetchrow("select id from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     if not b:
         raise HTTPException(404, "Batch not found")
-    ids = [str(r["id"]) for r in await db.fetch("select id from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)]
+    batch_uploads = await db.fetch("select id, columns from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)
+    ids = [str(r["id"]) for r in batch_uploads]
     totals = {"sales": 0, "customers": 0, "products": 0, "files": 0}
     for uid in ids:
         async with db.transaction() as c:
@@ -1435,6 +1456,7 @@ async def delete_batch(batch_id: str, ctx: Ctx = Depends(require("upload_data"))
     async with db.transaction() as c:
         await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     db.cache_clear()
+    await _forget_file_memory(ctx.org_id, [r["columns"] or [] for r in batch_uploads])
     await db.audit(ctx.org_id, ctx.user.id, "batch.deleted", "batch", batch_id, totals)
     return {"ok": True, "deleted": totals}
 

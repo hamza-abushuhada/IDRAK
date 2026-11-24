@@ -67,6 +67,36 @@ class Values(unittest.TestCase):
         self.assertEqual(flags(res, "future_date"), {(0, "Date")})
 
 
+class RememberedFileType(unittest.TestCase):
+    """A menu once confirmed as "supplier prices" (under the old detection) came back that way."""
+    HEADERS = ["Code", "Item", "Unit", "Cost", "Price", "Stock", "Min", "Supplier"]
+    MAPPING = {"Code": {"field": "sku"}, "Item": {"field": "product"}, "Unit": {"field": "pack_size"},
+               "Cost": {"field": "cost"}, "Price": {"field": "unit_price"}, "Stock": {"field": "stock"},
+               "Min": {"field": "minimum_stock"}, "Supplier": {"field": "supplier"}}
+
+    def carried(self, entity):
+        from app.cleaning.fields import field_signature
+        return {"entity": entity, "fields": field_signature(self.MAPPING), "via": "file"}
+
+    def test_a_confident_different_reading_turns_the_memory_into_a_question(self):
+        from app.cleaning.fields import ENTITY_KEY, entity_state, remembered_entity
+        m = dict(self.MAPPING)
+        m[ENTITY_KEY] = remembered_entity(self.HEADERS, m, self.carried("supplier_prices"))
+        state = entity_state(self.HEADERS, m)
+        self.assertIsNone(state["confirmed"])
+        self.assertEqual(state["entity"], "products")
+        self.assertTrue(state["blocked"])
+        self.assertIn({"code": "remembered_differs", "remembered": "supplier_prices"}, state["reasons"])
+        self.assertIn("supplier_prices", state["suggested"])
+
+    def test_a_memory_that_agrees_is_carried(self):
+        from app.cleaning.fields import ENTITY_KEY, entity_state, remembered_entity
+        m = dict(self.MAPPING)
+        m[ENTITY_KEY] = remembered_entity(self.HEADERS, m, self.carried("products"))
+        state = entity_state(self.HEADERS, m)
+        self.assertEqual((state["confirmed"], state["blocked"]), ("products", False))
+
+
 class WhatBlocksARow(unittest.TestCase):
     FIELDS = {"Qty": "quantity", "Unit Price": "unit_price", "Cost": "cost", "Total": "total"}.get
 

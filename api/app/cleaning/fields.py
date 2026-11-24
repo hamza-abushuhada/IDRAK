@@ -302,6 +302,21 @@ def field_signature(cols: dict[str, dict]) -> list[list[str]]:
     return sorted([h, m["field"]] for h, m in cols.items() if m.get("field"))
 
 
+def remembered_entity(headers: list[str], mapping: dict, carried: dict) -> dict:
+    """What to store under ENTITY_KEY for a type remembered from an earlier file.
+
+    Carried as confirmed only when Idrak reads this file the same way, or isn't
+    sure itself. A confident, different reading means the old choice was likely
+    made under an older, wrong detection (a menu once confirmed as "supplier
+    prices" came back that way after the file was deleted and re-uploaded), so the
+    old choice becomes a question instead of a silent answer.
+    """
+    check = entity_check(headers, {h: mapping.get(h) or {} for h in headers})
+    if carried.get("entity") == check["detected"] or check["needs_confirmation"]:
+        return carried
+    return {"remembered": carried.get("entity"), "via": carried.get("via")}
+
+
 def entity_state(headers: list[str], mapping: dict | None) -> dict:
     """entity_check() plus the user's saved confirmation, read from uploads.mapping.
 
@@ -312,6 +327,14 @@ def entity_state(headers: list[str], mapping: dict | None) -> dict:
     cols = {h: mapping.get(h) or {} for h in headers}
     state = entity_check(headers, cols)
     saved = mapping.get(ENTITY_KEY) or {}
+    # The type the company chose for its last file with these columns, set aside
+    # because Idrak now reads the file differently (see remembered_entity): ask.
+    remembered = saved.get("remembered")
+    if remembered in ENTITIES and remembered != state["detected"] and not saved.get("entity"):
+        state["reasons"].append({"code": "remembered_differs", "remembered": remembered})
+        state["needs_confirmation"] = True
+        if remembered not in state["suggested"]:
+            state["suggested"].append(remembered)
     ok = saved.get("entity") in ENTITIES and saved.get("fields") == field_signature(cols)
     state["confirmed"] = saved["entity"] if ok else None
     # "file": carried over from the company's last file with the same columns.
