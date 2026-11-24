@@ -1002,6 +1002,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
 
         if entity == "sales":
             sale_recs, item_recs = [], []
+            new_custs: dict[uuid.UUID, list] = {}  # id -> [name, phone, first sale date]
             groups = defaultdict(list)
             for ri, r in enumerate(rows):
                 invoice = g(r, "invoice_number")
@@ -1046,7 +1047,17 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     branch_name = g(r0, "branch")
                     br = await branch_id(branch_name) if branch_name else None
                     emp = await employee_id(g(r0, "cashier"), br)
-                    cust = custs.get(g(r0, "phone") or "")
+                    # The sale's customer, by phone. A phone not seen before is a new
+                    # customer: sales used to link only to customers that already existed,
+                    # so a sales file alone showed "0 known customers".
+                    phone = g(r0, "phone")
+                    cust = custs.get(phone) if phone else None
+                    if cust is None and phone and cleaning_parsers.E164.match(phone):
+                        cust = uuid.uuid4()
+                        custs[phone] = cust
+                        new_custs[cust] = [g(r0, "customer_name") or phone, phone, sold.date()]
+                    elif cust in new_custs and sold.date() < new_custs[cust][2]:
+                        new_custs[cust][2] = sold.date()
                     items, subtotal = [], Decimal("0")
                     ret_items, ret_total = [], Decimal("0")
                     disc_lines, has_pct = Decimal("0"), False
@@ -1149,22 +1160,40 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 except SkippedRow as exc:
                     _skip(exc.row_index if exc.row_index is not None else ri0, r0, exc.reason, exc.reason_ar)
                     continue
+            if new_custs:
+                # Before the sales that point at them. upload_id: deleting the file removes them too.
+                await c.copy_records_to_table(
+                    "customers", columns=["id", "org_id", "full_name", "phone", "first_seen", "upload_id"],
+                    records=[(cid, uuid.UUID(str(ctx.org_id)), nm, ph, first, upload_id)
+                             for cid, (nm, ph, first) in new_custs.items()])
+                stats["customers"] += len(new_custs)
             if sale_recs:
                 await c.copy_records_to_table("sales", records=sale_recs, columns=["id", "org_id", "branch_id", "employee_id", "customer_id", "invoice_number", "sold_at",
                                                                                    "subtotal", "discount", "tax", "total", "payment_method", "status", "upload_id"])
                 await c.copy_records_to_table("sale_items", records=item_recs, columns=["id", "org_id", "sale_id", "product_id", "quantity", "unit_price", "unit_cost", "discount", "line_total"])
         elif entity == "customers":
+            updates = []
             for ri, r in enumerate(rows):
                 name, phone = g(r, "customer_name"), g(r, "phone")
                 if not name and not phone:
                     continue
                 if phone and phone in custs:
+                    # Already known (often created from sales with just a phone): fill in
+                    # what this list adds instead of skipping the row.
+                    updates.append((custs[phone], ctx.org_id, name, g(r, "email"), g(r, "city"), g(r, "area")))
                     continue
                 cid = await c.fetchval("""insert into customers(org_id,full_name,phone,email,city,area,first_seen,upload_id) values($1,$2,$3,$4,$5,$6,current_date,$7) returning id""",
                                        ctx.org_id, name or phone, phone, g(r, "email"), g(r, "city"), g(r, "area"), upload_id)
                 if phone:
                     custs[phone] = cid
                 stats["customers"] += 1
+            if updates:
+                await c.executemany(
+                    """update customers set full_name = case when (full_name = phone or full_name = '') and $3::text is not null
+                                                             then $3 else full_name end,
+                                            email = coalesce(email, $4), city = coalesce(city, $5), area = coalesce(area, $6)
+                       where id=$1 and org_id=$2""", updates)
+                stats["customers_updated"] = len(updates)
         elif entity in ("products", "supplier_prices"):
             old_costs, old_prices = [], []
             main_branch: list = []  # cached on first use
