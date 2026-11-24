@@ -12,7 +12,7 @@ from . import bilingual as B
 from . import money as M
 from . import parsers as P
 from .arabic import clean_text, is_arabic, is_null, match_key, nums, place_key, skeleton, smart_title
-from .fields import REQUIRED, detect_entity, kind_of
+from .fields import REQUIRED, STANDS_IN, detect_entity, kind_of
 
 RULES = {
     "arabic_digits": ("Arabic-Indic digits converted (١٢٣ → 123)", "تحويل الأرقام الهندية (١٢٣) إلى أرقام عادية", "standardize"),
@@ -327,6 +327,13 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                     elif rule == "null_token":
                         record(ri, ci, "", "null_token")
                     continue
+                if d.date() > today + dt.timedelta(days=1) and isinstance(vals[ri], str):
+                    # 08/12/2026 read day-first is in the future (8 Dec) but month-first
+                    # is a past day (12 Aug): a sale can't be in the future, so take the
+                    # reading that isn't. Only when both readings are valid dates.
+                    alt, alt_rule = P.parse_date(vals[ri], not dayfirst)
+                    if alt is not None and alt.date() != d.date() and alt.date() <= today + dt.timedelta(days=1):
+                        d, rule = alt, alt_rule or "date_format"
                 if d.date() > today + dt.timedelta(days=1):
                     flags.append(Flag(ri, h, vals[ri], "future_date"))
                 record(ri, ci, P.fmt_date(d), rule)
@@ -492,6 +499,7 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
     qi = next((col_idx[x] for x, ff in fields.items() if ff == "quantity"), None)
     pi = next((col_idx[x] for x, ff in fields.items() if ff == "unit_price"), None)
     ti = next((col_idx[x] for x, ff in fields.items() if ff == "total"), None)
+    di = next((col_idx[x] for x, ff in fields.items() if ff == "discount"), None)
     if qi is not None and pi is not None and ti is not None:
         for ri in range(n):
             if ri in blank:
@@ -507,17 +515,25 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
             if exp > 2000:
                 continue
             t = clean[ri][ti]
+            # An empty total with a quantity and a price isn't a problem: the import
+            # computes the line from them. Flagging it put 1,390 rows in front of the
+            # user (and dropped them) for nothing.
             if not t:
-                flags.append(Flag(ri, headers[ti], "", "missing_total"))
-            else:
-                try:
-                    tv = Decimal(t)
-                    if abs(tv - exp) > Decimal("0.011") and abs(tv - exp) > Decimal("0.02") * max(abs(exp), Decimal("0.001")):
-                        flags.append(Flag(ri, headers[ti], t, "total_mismatch"))
-                except (ValueError, InvalidOperation):
-                    # InvalidOperation تُرفع من Decimal() لما تكون القيمة
-                    # نصاً غير رقمي — وما كانت ملتقطة، فكانت تُسقط الملف كله.
-                    flags.append(Flag(ri, headers[ti], t, "invalid_number"))
+                continue
+            try:
+                tv = Decimal(t)
+            except (ValueError, InvalidOperation):
+                # InvalidOperation تُرفع من Decimal() لما تكون القيمة
+                # نصاً غير رقمي — وما كانت ملتقطة، فكانت تُسقط الملف كله.
+                flags.append(Flag(ri, headers[ti], t, "invalid_number"))
+                continue
+            draw = clean[ri][di].strip() if di is not None and clean[ri][di] else ""
+            try:
+                disc = (exp * Decimal(draw[:-1]) / 100 if draw.endswith("%") else Decimal(draw)) if draw else Decimal("0")
+            except (InvalidOperation, TypeError):
+                disc = Decimal("0")
+            if not _total_explained(tv, exp, disc):
+                flags.append(Flag(ri, headers[ti], t, "total_mismatch"))
 
     for (ri, ci), rules in cell_rules.items():
         if clean[ri][ci] == raw[ri][ci]:
@@ -553,10 +569,13 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         if h is None:
             continue
         ci = col_idx[h]
+        # A value another column stands in for isn't missing: a sale's unit price
+        # comes from its line total, a purchase's from the carton price or total.
+        stand_ins = [col_idx[x] for x, ff in fields.items() if ff in STANDS_IN.get((entity, f), ())]
         for ri in range(n):
             if ri in blank or ri in dup:
                 continue
-            if not clean[ri][ci]:
+            if not clean[ri][ci] and not any(clean[ri][si] for si in stand_ins):
                 flags.append(Flag(ri, h, "", "missing_required"))
 
     removed = blank | dup
@@ -580,6 +599,28 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         "clean_rows": kept,
         "removed_rows": sorted(removed),
     }
+
+
+# Sales tax rates a line total may already include (Jordan's general rate is 16%).
+TAX_RATES = (Decimal("0"), Decimal("0.16"), Decimal("0.08"), Decimal("0.04"), Decimal("0.10"))
+
+
+def _close(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= Decimal("0.011") or abs(a - b) <= Decimal("0.02") * max(abs(b), Decimal("0.001"))
+
+
+def _total_explained(total: Decimal, expected: Decimal, discount: Decimal = Decimal("0")) -> bool:
+    """Does quantity x price, less the discount, plus a usual tax rate give this total?
+
+    POS exports often show the line total with 16% tax or after the discount; those
+    were flagged "doesn't match" (1,584 rows of one file) though nothing was wrong.
+    """
+    for base in {expected, expected - discount}:
+        if base <= 0:
+            continue
+        if any(_close(total, (base * (1 + r)).quantize(Decimal("0.001"))) for r in TAX_RATES):
+            return True
+    return False
 
 
 def _pair_languages(headers, fields, col_idx, clean, blank, ctx, record, clusters) -> None:

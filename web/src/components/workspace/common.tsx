@@ -148,6 +148,8 @@ export const PAYMENTS = [
   { v: "cliq", en: "CliQ", ar: "كليك" },
   { v: "wallet", en: "Wallet", ar: "محفظة" },
   { v: "online", en: "Online", ar: "أونلاين" },
+  // A sale whose payment method was missing or unknown in the file (kept, not dropped).
+  { v: "other", en: "Not recorded", ar: "غير مسجّلة" },
 ];
 export const SALE_STATUSES = [
   { v: "completed", en: "Completed", ar: "مكتملة", tone: "olive" as const },

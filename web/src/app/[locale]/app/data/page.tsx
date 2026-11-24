@@ -165,7 +165,7 @@ export default function DataHub() {
           onRow={(u) => u.batch_id ? router.push(`/${locale}/app/data/batches/${u.batch_id}`) : (u.last_run_id ? router.push(`/${locale}/app/data/runs/${u.last_run_id}`) : u.has_data && router.push(`/${locale}/app/data/uploads/${u.id}`))}
           cols={[
             { key: "file", label: tx("File", "الملف"), render: (u) => <span className="font-medium text-ink">{u.file_name}</span> },
-            { key: "entity", label: tx("Type", "النوع"), render: (u) => <span className="text-ink-2">{({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد") } as Record<string, string>)[u.entity] || u.entity}</span> },
+            { key: "entity", label: tx("Type", "النوع"), render: (u) => <span className="text-ink-2">{({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد"), purchases: tx("Purchases", "مشتريات") } as Record<string, string>)[u.entity] || u.entity}</span> },
             { key: "rows", label: tx("Rows", "الصفوف"), align: "end", render: (u) => <span className="num">{u.row_count.toLocaleString()}</span> },
             { key: "health", label: tx("Health", "الصحة"), render: (u) => u.health_before != null ? <span className="num"><span className="text-danger">{u.health_before.toFixed(0)}</span> <span className="text-ink-3">→</span> <span className="text-olive">{u.health_after?.toFixed(0)}</span></span> : "—" },
             { key: "status", label: tx("Status", "الحالة"), render: (u) => { const [l, t] = status(u.status); return <Badge tone={t}>{l}</Badge>; } },
@@ -213,7 +213,7 @@ export default function DataHub() {
               <p className="mb-1 text-[12px] font-medium uppercase tracking-wide text-ink-3">{tx("File", "الملف")}</p>
               <p className="font-mono text-[13px] text-ink break-all">{pending.file_name}</p>
               <p className="mt-1 text-[12.5px] text-ink-3">
-                <span className="num">{pending.row_count.toLocaleString()}</span> {tx("rows", "صف")} · {({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد") } as Record<string, string>)[pending.entity] || pending.entity}
+                <span className="num">{pending.row_count.toLocaleString()}</span> {tx("rows", "صف")} · {({ sales: tx("Sales", "مبيعات"), customers: tx("Customers", "زبائن"), products: tx("Products", "أصناف"), supplier_prices: tx("Supplier prices", "أسعار مورد"), purchases: tx("Purchases", "مشتريات") } as Record<string, string>)[pending.entity] || pending.entity}
               </p>
             </div>
             <div>

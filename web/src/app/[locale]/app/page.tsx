@@ -114,9 +114,13 @@ function DashboardScreen() {
               <Stat id="kpi-basket" label={tx("Average basket", "متوسط السلة")} value={<Money v={k.basket} decimals={3} />} delta={d.deltas.basket}
                 hint={tx(`${num(k.units_per_tx, 1)} items per receipt`, `${num(k.units_per_tx, 1)} قطعة بالفاتورة`)} />
               <Stat id="kpi-margin" label={tx("Gross margin", "هامش الربح")} value={<span className="num">{pct(k.margin)}</span>} delta={d.deltas.margin}
-                hint={tx(`Discounts ${jd(k.discounts, locale)}`, `خصومات ${jd(k.discounts, locale)}`)} />
+                hint={k.returns
+                  ? tx(`Discounts ${jd(k.discounts, locale)} · returns ${jd(k.returns_value ?? 0, locale)}`,
+                       `خصومات ${jd(k.discounts, locale)} · مرتجعات ${jd(k.returns_value ?? 0, locale)}`)
+                  : tx(`Discounts ${jd(k.discounts, locale)}`, `خصومات ${jd(k.discounts, locale)}`)} />
               <Stat id="kpi-transactions" label={tx("Receipts", "عدد الفواتير")} value={<N v={k.tx} />} delta={d.deltas.tx}
-                hint={tx(`${num(k.customers)} known customers · ${num(k.voids)} voids`, `${num(k.customers)} زبون معروف · ${num(k.voids)} ملغية`)} />
+                hint={tx(`${num(k.customers)} known customers · ${num(k.voids)} voids · ${num(k.returns ?? 0)} returns`,
+                         `${num(k.customers)} زبون معروف · ${num(k.voids)} ملغية · ${num(k.returns ?? 0)} مرتجع`)} />
             </>)}
           </div>
 

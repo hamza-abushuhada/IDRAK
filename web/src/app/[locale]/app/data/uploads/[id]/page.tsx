@@ -21,7 +21,24 @@ type EntityReason =
   | { code: "mixed_signals"; signal: "purchase" | "waste" }
   | { code: "missing_required"; fields: string[] }
   | { code: "unconfirmed_fields"; columns: string[]; instead_of: string }
-  | { code: "unrecognized" };
+  | { code: "unrecognized" }
+  | { code: "remembered_differs"; remembered: string };
+
+// What importing each file type writes, so the choice is an informed one: a menu
+// once confirmed as "supplier prices" lost its selling prices and stock.
+const ENTITY_EFFECT: Record<string, [string, string]> = {
+  sales: ["Each row is a sale line: revenue, profit, branches, cashiers and customers.",
+          "كل سطر بيصير بيعة: الإيراد والربح والفروع والكاشير والزبائن."],
+  products: ["Your item list or menu: selling prices, costs, stock, reorder levels and expiry.",
+             "قائمة أصنافك أو المنيو: أسعار البيع والتكاليف والمخزون والحد الأدنى والصلاحية."],
+  supplier_prices: ["A supplier price list: it only updates your item costs.",
+                    "قائمة أسعار مورد: بتحدّث تكلفة الأصناف بس."],
+  purchases: ["Purchases from suppliers: suppliers, purchase invoices and item costs.",
+              "مشتريات من الموردين: الموردين وفواتير الشراء وتكلفة الأصناف."],
+  customers: ["Your customer list: names, phones, cities and areas.", "قائمة زبائنك: الأسماء والهواتف والمدن والمناطق."],
+  unknown: ["A generic table is checked and cleaned, but nothing from it is imported.",
+            "الجدول العام بينفحص وبيتنظّف، بس ما بينستورد منه إشي."],
+};
 type EntityCheck = {
   detected: string; entity: string; confirmed: string | null; needs_confirmation: boolean; blocked: boolean;
   reasons: EntityReason[]; suggested: string[];
@@ -155,8 +172,8 @@ export default function MappingPage() {
   const reasonText = (r: EntityReason) => {
     switch (r.code) {
       case "purchase_guard":
-        return tx("The column names say these are purchases from a supplier, not sales. Idrak will only update your item costs from it.",
-                  "أسماء الأعمدة بتقول إنها مشتريات من مورد مش مبيعات. إدراك رح يحدّث تكلفة الأصناف منه بس.");
+        return tx("The column names say these are purchases from a supplier, not sales: Idrak records them as purchases (suppliers, invoices, item costs).",
+                  "أسماء الأعمدة بتقول إنها مشتريات من مورد مش مبيعات: إدراك بيسجّلها كمشتريات (الموردين والفواتير وتكلفة الأصناف).");
       case "waste_guard":
         return tx("This looks like a waste or spoilage log. Idrak doesn't import waste yet, so nothing will be imported from it.",
                   "شكله سجل هدر وتالف. إدراك لسا ما بيستورد الهدر، فما رح ينستورد منه إشي.");
@@ -171,6 +188,9 @@ export default function MappingPage() {
                   `النوع معتمد على أعمدة إدراك مش متأكد منها: ${r.columns.join("، ")}`);
       case "unrecognized":
         return tx("Idrak couldn't tell what this file is.", "إدراك ما عرف شو نوع هالملف.");
+      case "remembered_differs":
+        return tx(`Last time, a file with these columns was set as ${entityLabel(r.remembered)}; Idrak now reads it as ${entityLabel(check?.detected ?? entity)}. Which one is right?`,
+                  `آخر مرة ملف بنفس الأعمدة انحفظ كـ${entityLabel(r.remembered)}، وإدراك هلّق بيقراه ${entityLabel(check?.detected ?? entity)}. أي واحد الصح؟`);
     }
   };
 
@@ -241,11 +261,10 @@ export default function MappingPage() {
               {check.reasons.map((r, i) => <li key={i}>{reasonText(r)}</li>)}
             </ul>
           )}
-          {entity === "unknown" ? (
-            <p className="mt-2 ps-6 text-[12px] text-ink-3">
-              {tx("A generic table is checked and cleaned, but nothing from it is imported.", "الجدول العام بينفحص وبيتنظّف، بس ما بينستورد منه إشي.")}
-            </p>
-          ) : missingForEntity.length > 0 && !entityPending && (
+          {ENTITY_EFFECT[entity] && (
+            <p className="mt-2 ps-6 text-[12px] text-ink-3">{tx(ENTITY_EFFECT[entity][0], ENTITY_EFFECT[entity][1])}</p>
+          )}
+          {entity !== "unknown" && missingForEntity.length > 0 && !entityPending && (
             <p className="mt-2 ps-6 text-[12px] text-[#8a5d0e]">
               {tx(`Missing for this type: ${missingForEntity.map(label).join(", ")}`, `ناقص لهالنوع: ${missingForEntity.map(label).join("، ")}`)}
             </p>

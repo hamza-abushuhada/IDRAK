@@ -19,10 +19,10 @@ type Issue = { key: string; kind: "fix" | "flag"; title_en: string; title_ar: st
 type Cluster = { column: string; field: string; canonical: string; variants: { value: string; count: number }[]; rows: number };
 type Run = {
   id: string; upload_id: string; file_name: string; status: string; entity: string; score_before: Score; score_after: Score; columns: string[];
-  stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number>; learned_rules?: number;
+  stats: { rows_before: number; rows_after: number; issues: Issue[]; clusters: Cluster[]; flag_count: number; memory_hits: number; import?: Record<string, number | string[]>; learned_rules?: number;
     skipped?: { count: number; items: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] };
     branches_created?: string[];
-    returns?: { lines: number; invoices: number; value: number } };
+    returns?: { lines: number; invoices: number; value: number; imported?: boolean } };
   rule_status: Record<string, { proposed: number; approved: number; rejected: number }>; totals: { proposed: number; approved: number; rejected: number };
   imported_at: string | null; reverted_at: string | null;
 };
@@ -30,6 +30,17 @@ type Cell = { v: string; change: { id: string; new_value: string; rule: string; 
 type Grid = { columns: string[]; total: number; rows: { i: number; cells: Cell[]; row_change: { rule: string; new_value: string; status: string } | null }[] };
 
 const DIMS: [string, string, string][] = [["completeness", "Completeness", "الاكتمال"], ["validity", "Validity", "الصلاحية"], ["consistency", "Consistency", "الاتساق"], ["uniqueness", "Uniqueness", "عدم التكرار"], ["timeliness", "Timeliness", "حداثة التواريخ"]];
+
+// What an import wrote (api/app/routers/data.py: apply_run stats), in words.
+const IMPORT_LABELS: Record<string, [string, string]> = {
+  sales: ["sales", "فاتورة مبيعات"], lines: ["sale lines", "سطر مبيعات"],
+  customers: ["customers", "زبون"], customers_updated: ["customers completed", "زبون اكتملت بياناته"],
+  products_created: ["new products", "صنف جديد"], products_updated: ["products updated", "صنف انحدّث"],
+  products_no_cost: ["products with no cost yet", "صنف لسا بدون كلفة"],
+  purchases: ["purchase invoices", "فاتورة شراء"], purchase_lines: ["purchase lines", "سطر شراء"],
+  suppliers_created: ["new suppliers", "مورد جديد"], stock_levels: ["stock levels", "رصيد مخزون"],
+  payment_other: ["sales with no payment method", "بيعة بدون طريقة دفع"],
+};
 
 export default function RunPage() {
   const { id } = useParams<{ id: string }>();
@@ -41,7 +52,7 @@ export default function RunPage() {
   const run = useApiQuery<Run>(`/data/runs/${id}`);
   const [tab, setTab] = useState<"fixes" | "merges" | "grid" | "review">("fixes");
   const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] }; branches_created?: string[]; returns?: { lines: number; invoices: number; value: number } } | null>(null);
+  const [result, setResult] = useState<{ imported: Record<string, number | string[]>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] }; branches_created?: string[]; returns?: { lines: number; invoices: number; value: number; imported?: boolean } } | null>(null);
   const r = run.data;
   const refresh = () => qc.invalidateQueries({ predicate: (q) => String(q.queryKey[1] || "").includes(`/data/runs/${id}`) });
 
@@ -61,7 +72,7 @@ export default function RunPage() {
   async function apply() {
     setBusy("apply");
     try {
-      const res = await api<{ imported: Record<string, number>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } }>(`/data/runs/${id}/apply`, { method: "POST" });
+      const res = await api<{ imported: Record<string, number | string[]>; learned_rules: number; skipped?: { count: number; sample: { row: number | null; reason: string; reason_ar: string; data: Record<string, string> }[] } }>(`/data/runs/${id}/apply`, { method: "POST" });
       setResult(res);
       refresh();
       qc.invalidateQueries();
@@ -134,7 +145,13 @@ export default function RunPage() {
         {(result || (imported && r?.stats.import)) && (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line bg-olive-soft/60 px-6 py-3 text-[13.5px] text-olive">
             <span className="font-medium"><Check size={15} className="me-1 inline" />{tx("Imported into your workspace", "انضافت لمساحة شغلك")}</span>
-            {Object.entries(result?.imported || r?.stats.import || {}).filter(([, v]) => v).map(([k, v]) => <span key={k} className="num">{v} {k.replace("_", " ")}</span>)}
+            {Object.entries(result?.imported || r?.stats.import || {}).map(([k, v]) => {
+              // Counts only; lists (suppliers_created) show as a count.
+              const n = Array.isArray(v) ? v.length : typeof v === "number" ? v : 0;
+              if (!n) return null;
+              const l = IMPORT_LABELS[k];
+              return <span key={k}><b className="num">{n.toLocaleString()}</b> {l ? tx(l[0], l[1]) : k.replace(/_/g, " ")}</span>;
+            })}
             <span>{tx("Rules learned", "قواعد متعلّمة")}: <b className="num">{result?.learned_rules ?? r?.stats.learned_rules ?? 0}</b></span>
             <button onClick={() => router.push(`/${locale}/app`)} className="ms-auto underline">{tx("See it on the dashboard →", "شوفها على لوحة التحكم ←")}</button>
           </div>
@@ -147,14 +164,29 @@ export default function RunPage() {
               <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
                 <AlertTriangle size={15} className="mt-0.5 text-saffron" />
                 <div className="min-w-0">
-                  <p className="font-medium">
-                    {tx(`${ret.invoices} return invoices were not imported (${ret.value.toFixed(0)} JD)`,
-                        `${ret.invoices} فاتورة مرتجع ما انستوردت (${ret.value.toFixed(0)} د.أ)`)}
-                  </p>
-                  <p className="mt-0.5 text-ink-3">
-                    {tx("Their quantity is negative and would flip revenue and profit. Everything else was imported normally — but because returns are outside the numbers, sales and profit read slightly higher than reality.",
-                        "كمياتها سالبة وبتقلب الإيراد والربح، فتركناهم برّا. باقي الملف انستورد عادي — بس لأن المرتجعات مش محسوبة، المبيعات والربح بيطلعوا أعلى من الواقع شوي.")}
-                  </p>
+                  {ret.imported ? (
+                    <>
+                      <p className="font-medium">
+                        {tx(`${ret.invoices} return invoices imported as returns (${ret.value.toFixed(3)} JD)`,
+                            `${ret.invoices} فاتورة مرتجع انستوردت كمرتجعات (${ret.value.toFixed(3)} د.أ)`)}
+                      </p>
+                      <p className="mt-0.5 text-ink-3">
+                        {tx("Rows with a negative quantity are returns. They're kept apart from sales so revenue stays clean, and shown on the dashboard and in the sales list as \"Returned\".",
+                            "الأسطر اللي كميتها سالبة هي مرتجعات. انحفظت لحالها بعيد عن المبيعات عشان الإيراد يضل نظيف، وبتطلع على لوحة التحكم وبقائمة المبيعات كـ\"مرتجعة\".")}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="font-medium">
+                        {tx(`${ret.invoices} return invoices were not imported (${ret.value.toFixed(0)} JD)`,
+                            `${ret.invoices} فاتورة مرتجع ما انستوردت (${ret.value.toFixed(0)} د.أ)`)}
+                      </p>
+                      <p className="mt-0.5 text-ink-3">
+                        {tx("Their quantity is negative and would flip revenue and profit. Everything else was imported normally — but because returns are outside the numbers, sales and profit read slightly higher than reality.",
+                            "كمياتها سالبة وبتقلب الإيراد والربح، فتركناهم برّا. باقي الملف انستورد عادي — بس لأن المرتجعات مش محسوبة، المبيعات والربح بيطلعوا أعلى من الواقع شوي.")}
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

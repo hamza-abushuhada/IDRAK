@@ -18,7 +18,7 @@ from ..cleaning.arabic import match_key, place_key
 from ..cleaning.context import KIND_ALIAS, load_context
 from ..cleaning import learning, referee
 from ..cleaning.fields import (ENTITIES, ENTITY_KEY, ENTITY_LABELS, FIELDS, LABELS, NEEDS, auto_map,
-                               entity_state, field_signature, kind_of)
+                               entity_state, field_signature, kind_of, remembered_entity)
 from ..cleaning.io import read_table
 from ..services import ai
 
@@ -104,6 +104,25 @@ async def _load_file_memory(org_id: str, headers: list[str]) -> dict | None:
         return None
 
 
+async def _forget_file_memory(org_id: str, column_lists: list[list[str]]) -> None:
+    """Forget the remembered format of deleted files, unless another upload still has those columns.
+
+    Deleting a file and uploading it again brought back the type confirmed the first
+    time, even when that first choice was the wrong one.
+    """
+    try:
+        gone = {fp for cols in column_lists if (fp := learning.fingerprint(cols or []))}
+        if not gone:
+            return
+        for r in await db.fetch("select columns from uploads where org_id=$1", org_id):
+            gone.discard(learning.fingerprint(r["columns"] or []))
+        if gone:
+            await db.execute("delete from mapping_fingerprints where org_id=$1 and fingerprint = any($2::text[])",
+                             org_id, list(gone))
+    except Exception:
+        log.warning("file memory not forgotten", exc_info=True)
+
+
 async def _remember_file(ctx: Ctx, headers: list[str], rows: list[list], mapping: dict, state: dict) -> None:
     """Save this file's confirmed mapping and type under its fingerprint (cleaning/learning.py)."""
     try:
@@ -186,7 +205,7 @@ async def _create_upload(ctx: Ctx, filename: str, data: bytes, source: str = "up
     # نوع الملف المؤكَّد على آخر ملف بنفس الأعمدة بينتقل، بس إذا ولا عمود
     # رجع للمراجعة وكل عمود محافظ على حقله (نفس قاعدة field_signature).
     if from_file and (carried := learning.carried_entity(headers, mapping, saved)):
-        mapping[ENTITY_KEY] = carried
+        mapping[ENTITY_KEY] = remembered_entity(headers, mapping, carried)
     entity = entity_state(headers, mapping)["entity"]
     uid = await db.fetchval("""insert into uploads(org_id,uploaded_by,batch_id,file_name,file_size,source,entity,sheet_name,row_count,column_count,columns,mapping,status)
                                values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'mapped') returning id""",
@@ -241,7 +260,7 @@ async def _build_batch_report(batch_id: str, org_id: str) -> dict:
     for upload in uploads:
         files.append({k: upload[k] for k in ("id", "file_name", "entity", "row_count")})
         names = _column_values(upload, "product")
-        if upload["entity"] in ("products", "supplier_prices"):
+        if upload["entity"] in ("products", "supplier_prices", "purchases"):
             catalog_names.update(match_key(v) for v in names if match_key(v))
             name_index = _column_index(upload, "product")
             barcode_index = _column_index(upload, "barcode")
@@ -281,7 +300,7 @@ async def _build_batch_report(batch_id: str, org_id: str) -> dict:
     if unknown_files:
         warnings.append({"code": "unknown_files", "count": unknown_files})
 
-    rank = {"products": 1, "supplier_prices": 2, "customers": 3, "sales": 4, "unknown": 5}
+    rank = {"products": 1, "supplier_prices": 2, "purchases": 2, "customers": 3, "sales": 4, "unknown": 5}
     return {
         "files": files,
         "rows": sum(upload["row_count"] for upload in uploads),
@@ -518,9 +537,7 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     memory_hits = sum(1 for c in res["changes"] if c["rule"] == "memory")
     # الصنف غير الموجود ليس سبباً لتخطّي الصف: الاستيراد ينشئه.
     # كان هنا فكانت كل صفوف ملف فيه أصناف جديدة تُتخطّى.
-    blocking_reasons = {"missing_total", "total_mismatch", "invalid_date", "invalid_number",
-                    "unknown_payment", "missing_required", "future_date"}
-    blocking_flags = [f for f in res["flags"] if f["reason"] in blocking_reasons]
+    blocking_flags = [f for f in res["flags"] if _blocks(f, mapping.get)]
     stats = {"rows_before": res["rows_before"], "rows_after": res["rows_after"], "issues": res["issues"], "clusters": res["clusters"],
              "flags": res["flags"][:500], "flag_count": len(res["flags"]),
              "blocking_flags": blocking_flags[:500], "blocking_flag_count": len(blocking_flags),
@@ -703,6 +720,40 @@ def _money(v) -> Decimal | None:
         return None
 
 
+# What keeps a sales row out of the import. A missing or mismatched line total, an
+# unreadable cost or tax, or an unknown payment method don't: the import computes the
+# line from quantity x price, takes a product's cost from its other rows and records
+# the payment as "other". Each of those used to drop the whole invoice (408 rows of
+# one restaurant file).
+_BLOCKING = {"invalid_date", "missing_required", "future_date"}
+_ESSENTIAL_NUMBERS = {"quantity", "unit_price"}
+_PAYMENTS = ("cash", "card", "cliq", "wallet", "online")
+# Kept with the run for undo/delete, left out of summaries shown or audited.
+_PRIVATE_STATS = ("old_costs", "old_prices", "purchase_ids")
+
+
+async def _remove_imported_purchases(c, org_id: str, run_stats: dict) -> int:
+    """Delete a run's purchases and the suppliers it created that nothing uses any more.
+
+    Purchases have no upload_id, so their ids are kept with the run (stats).
+    """
+    ids = [i for i in (run_stats.get("purchase_ids") or []) if i]
+    n = _rowcount(await c.execute("delete from purchases where org_id=$1 and id = any($2::uuid[])", org_id, ids)) if ids else 0
+    made = [s for s in (run_stats.get("suppliers_created") or []) if s]
+    if made:
+        await c.execute("""delete from suppliers s where s.org_id=$1 and s.name = any($2::text[])
+                             and not exists (select 1 from purchases p where p.supplier_id=s.id)
+                             and not exists (select 1 from products pr where pr.supplier_id=s.id)""", org_id, made)
+    return n
+
+
+def _blocks(flag: dict, field_of) -> bool:
+    """Does this cleaning flag keep its row out of a sales import? field_of: column -> field."""
+    if flag.get("reason") in _BLOCKING:
+        return True
+    return flag.get("reason") == "invalid_number" and field_of(flag.get("column")) in _ESSENTIAL_NUMBERS
+
+
 class SkippedRow(Exception):
     """تُرفع داخليّاً لتخطّي صفّ واحد أثناء الاستيراد مع الاحتفاظ بالسبب.
 
@@ -763,8 +814,13 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             "missing_required": ("A required value is missing", "قيمة أساسية ناقصة"),
             "future_date": ("Date is in the future", "تاريخ بالمستقبل"),
         }
+        def field_of(col):
+            return ((run["mapping"] or {}).get(col) or {}).get("field")
+
         for f in (run["stats"] or {}).get("blocking_flags", []):
             if (f.get("row"), f.get("column")) in approved_cells:
+                continue
+            if not _blocks(f, field_of):  # runs cleaned before these rules stored more flags
                 continue
             entry = reason_labels.get(f.get("reason"), (f.get("reason"), f.get("reason")))
             blocked_reasons.setdefault(f.get("row"), entry)
@@ -781,6 +837,16 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     # لو الملف ما فيه عمود تكلفة، لا نرمي الصفوف: ننشئ الصنف بتكلفة 0
     # ونعدّها، وننبّه إن الربح ما بينحسب إلا بعد ما تُدخل التكاليف.
     has_cost_col = "cost" in fmap
+    # A product's cost from all its rows in this file. A new product whose row had
+    # no cost ("غير محدد") dropped that row, though its other rows had one.
+    file_costs: dict[str, Decimal] = {}
+    if has_cost_col:
+        by_name: dict[str, list[Decimal]] = defaultdict(list)
+        for r in rows:
+            nm, cv = g(r, "product"), _money(g(r, "cost"))
+            if nm and cv is not None and cv >= 0:
+                by_name[match_key(nm)].append(cv)
+        file_costs = {k: sorted(v)[len(v) // 2] for k, v in by_name.items()}
     # الفروع اللي أنشأها الاستيراد تلقائياً (اسم الفرع ظهر بالملف وما كان موجود).
     branches_created: list[str] = []
     # المرتجعات (كمية سالبة) لا تُستورد: قيمتها سالبة وتقلب الإيراد والربح،
@@ -887,6 +953,27 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             branches_created.append(name)
             return bid
 
+        suppliers: dict[str, str] = {}
+        for s in await c.fetch("select id, name, name_ar from suppliers where org_id=$1 order by created_at", ctx.org_id):
+            for nm in (s["name"], s["name_ar"]):
+                if nm:
+                    suppliers.setdefault(match_key(nm), s["id"])
+
+        async def supplier_id(name: str):
+            """The supplier's id, created when the file names a new one (purchases, a menu's default supplier).
+
+            Imports never wrote suppliers, so the suppliers page stayed empty after a
+            2,500-row purchases file.
+            """
+            k = match_key(name)
+            if not k:
+                return None
+            if k not in suppliers:
+                suppliers[k] = await c.fetchval("insert into suppliers(org_id,name) values($1,$2) returning id",
+                                                ctx.org_id, name)
+                stats.setdefault("suppliers_created", []).append(name)
+            return suppliers[k]
+
         def find_product(name, barcode=None):
             if barcode and _valid_barcode(barcode):
                 matches = barcodes.get(re.sub(r"\D", "", barcode), [])
@@ -915,27 +1002,25 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         existing["category_id"] = cid
                 return pid_e, existing["cost"]
             if cost is None:
-                if not has_cost_col:
-                    # الملف كله بلا تكلفة — ننشئ الصنف ونكمل، والتنبيه
-                    # يطلع بالملخّص بدل ما نضيّع كل المبيعات.
-                    stored_barcode0 = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
-                    cid0 = await category_id(category) if category else None
-                    pid0 = await c.fetchval(
-                        "insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id)"
-                        " values($1,$2,$3,$4,$5,0,$6,$7) returning id",
-                        ctx.org_id, name, sku, stored_barcode0, price or 0, upload_id, cid0)
-                    product = {"id": pid0, "name": name, "cost": 0, "price": price,
-                               "barcode": stored_barcode0, "sku": sku, "category_id": cid0}
-                    names[k].append(product)
-                    if stored_barcode0:
-                        barcodes[stored_barcode0].append(product)
-                    stats["products_created"] += 1
-                    stats["products_no_cost"] += 1
-                    return pid0, 0
-                raise SkippedRow(
-                    f"Unknown product has no cost: {name}. Add it to the catalog or include a cost column",
-                    f"صنف جديد بدون تكلفة: {name}. أضفه للكتالوج أو ضمّن عمود تكلفة",
-                )
+                cost = file_costs.get(k)  # the same product's cost on its other rows
+            if cost is None:
+                # بلا تكلفة بالملف كله لهالصنف — ننشئه بتكلفة 0 ونكمل، والتنبيه
+                # يطلع بالملخّص بدل ما نضيّع مبيعاته. (كان يتخطّى الصف لما يكون
+                # بالملف عمود تكلفة، حتى لو القيمة بس ناقصة بهالسطر.)
+                stored_barcode0 = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
+                cid0 = await category_id(category) if category else None
+                pid0 = await c.fetchval(
+                    "insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id)"
+                    " values($1,$2,$3,$4,$5,0,$6,$7) returning id",
+                    ctx.org_id, name, sku, stored_barcode0, price or 0, upload_id, cid0)
+                product = {"id": pid0, "name": name, "cost": 0, "price": price,
+                           "barcode": stored_barcode0, "sku": sku, "category_id": cid0}
+                names[k].append(product)
+                if stored_barcode0:
+                    barcodes[stored_barcode0].append(product)
+                stats["products_created"] += 1
+                stats["products_no_cost"] += 1
+                return pid0, 0
             cost = _money(cost)
             if cost is None or cost < 0:
                 raise SkippedRow(
@@ -955,6 +1040,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
 
         if entity == "sales":
             sale_recs, item_recs = [], []
+            new_custs: dict[uuid.UUID, list] = {}  # id -> [name, phone, first sale date]
             groups = defaultdict(list)
             for ri, r in enumerate(rows):
                 invoice = g(r, "invoice_number")
@@ -999,20 +1085,42 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     branch_name = g(r0, "branch")
                     br = await branch_id(branch_name) if branch_name else None
                     emp = await employee_id(g(r0, "cashier"), br)
-                    cust = custs.get(g(r0, "phone") or "")
+                    # The sale's customer, by phone. A phone not seen before is a new
+                    # customer: sales used to link only to customers that already existed,
+                    # so a sales file alone showed "0 known customers".
+                    phone = g(r0, "phone")
+                    cust = custs.get(phone) if phone else None
+                    if cust is None and phone and cleaning_parsers.E164.match(phone):
+                        cust = uuid.uuid4()
+                        custs[phone] = cust
+                        new_custs[cust] = [g(r0, "customer_name") or phone, phone, sold.date()]
+                    elif cust in new_custs and sold.date() < new_custs[cust][2]:
+                        new_custs[cust][2] = sold.date()
                     items, subtotal = [], Decimal("0")
-                    disc_lines, has_pct, saw_negative = Decimal("0"), False, False
+                    ret_items, ret_total = [], Decimal("0")
+                    disc_lines, has_pct = Decimal("0"), False
                     for _ri, r in lines:
                         name = g(r, "product")
                         q = _num(g(r, "quantity"))
                         p = _num(g(r, "unit_price"))
                         t = _num(g(r, "total"))
                         cost = _num(g(r, "cost"))
+                        if name and q is not None and -200 <= q < 0:
+                            # A negative quantity is a return. It used to be dropped (and its
+                            # value read from the raw total, fils and all: "183,155 JD").
+                            # Now it's kept as a "returned" sale, valued at |quantity| x price.
+                            rq = -q
+                            rp = abs(p) if p is not None else (abs(t) / rq if t is not None else None)
+                            rprice = _money(rp) if rp is not None else None
+                            if rprice is None or rprice <= 0:
+                                continue
+                            rpid, rcost = await product_id(name, rprice, abs(cost) if cost is not None else None,
+                                                          g(r, "barcode"), g(r, "sku"), g(r, "category"))
+                            rlt = (Decimal(str(rq)) * rprice).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                            ret_items.append((rpid, Decimal(str(rq)), rprice, rcost, rlt, Decimal("0")))
+                            ret_total += rlt
+                            continue
                         if not name or q is None or q <= 0 or q > 200:
-                            if q is not None and q < 0:
-                                saw_negative = True
-                                returns["lines"] += 1
-                                returns["value"] += abs(_money(g(r, "total")) or Decimal("0"))
                             continue
                         if p is None and t is not None:
                             p = t / q
@@ -1040,15 +1148,26 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         disc_lines += d_amt
                         subtotal += lt
                         items.append((pid, Decimal(str(q)), price, cost, lt, d_amt))
+                    if not items and not ret_items:
+                        continue
+                    pm = g(r0, "payment_method")
+                    if pm not in _PAYMENTS:
+                        # A missing or unknown payment method is still a sale: it's
+                        # kept as "other" (shown as "not recorded"), not dropped.
+                        pm = "other"
+                        stats["payment_other"] = stats.get("payment_other", 0) + 1
+                    if ret_items:
+                        rid = uuid.uuid4()
+                        sale_recs.append((rid, uuid.UUID(str(ctx.org_id)), br, emp, cust, inv, sold, ret_total, Decimal("0"),
+                                          Decimal("0"), ret_total, pm, "returned", upload_id))
+                        item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), rid, pid, q, p, cost, d_amt, lt)
+                                         for pid, q, p, cost, lt, d_amt in ret_items)
+                        returns["invoices"] += 1
+                        returns["lines"] += len(ret_items)
+                        returns["value"] += ret_total
                     if not items:
-                        if saw_negative:
-                            returns["invoices"] += 1
                         continue
                     sid = uuid.uuid4()
-                    pm = g(r0, "payment_method")
-                    if pm not in ("cash", "card", "cliq", "wallet", "online"):
-                        raise SkippedRow(f"Invoice {inv}: unknown or missing payment method ({pm or 'empty'})",
-                                         f"الفاتورة {inv}: طريقة دفع غير معروفة أو مفقودة ({pm or 'فارغ'})", ri0)
                     contract = run["batch_contract"] or {}
                     # لو الملف يحمل نسباً، مجموع خصومات البنود هو خصم الفاتورة.
                     discount = disc_lines if has_pct else (_money(g(r0, "discount") or 0) or Decimal("0"))
@@ -1079,24 +1198,122 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                 except SkippedRow as exc:
                     _skip(exc.row_index if exc.row_index is not None else ri0, r0, exc.reason, exc.reason_ar)
                     continue
+            if new_custs:
+                # Before the sales that point at them. upload_id: deleting the file removes them too.
+                await c.copy_records_to_table(
+                    "customers", columns=["id", "org_id", "full_name", "phone", "first_seen", "upload_id"],
+                    records=[(cid, uuid.UUID(str(ctx.org_id)), nm, ph, first, upload_id)
+                             for cid, (nm, ph, first) in new_custs.items()])
+                stats["customers"] += len(new_custs)
             if sale_recs:
                 await c.copy_records_to_table("sales", records=sale_recs, columns=["id", "org_id", "branch_id", "employee_id", "customer_id", "invoice_number", "sold_at",
                                                                                    "subtotal", "discount", "tax", "total", "payment_method", "status", "upload_id"])
                 await c.copy_records_to_table("sale_items", records=item_recs, columns=["id", "org_id", "sale_id", "product_id", "quantity", "unit_price", "unit_cost", "discount", "line_total"])
+        elif entity == "purchases":
+            # Supplier invoices become purchases: the suppliers page, cash flow and cost
+            # trends read them. They used to be read as a price list that only touched
+            # item costs, so 2,500 purchase lines left the suppliers page empty.
+            pur_recs, pitem_recs, purchase_ids, old_costs = [], [], [], []
+            pgroups: dict[tuple, list] = defaultdict(list)
+            for ri, r in enumerate(rows):
+                if not g(r, "product"):
+                    continue
+                key = (g(r, "invoice_number") or "", (g(r, "date") or "")[:10],
+                       match_key(g(r, "supplier") or ""), place_key(g(r, "branch")) if g(r, "branch") else "")
+                pgroups[key].append((ri, r))
+            tz = dt.timezone(dt.timedelta(hours=3))
+            for (inv, day, _sk, _bk), lines in pgroups.items():
+                ri0, r0 = lines[0]
+                try:
+                    ordered = dt.datetime.fromisoformat(day).replace(tzinfo=tz) if day else None
+                except ValueError:
+                    ordered = None
+                if ordered is None:
+                    for ri, r in lines:
+                        _skip(row_map[ri] if ri < len(row_map) else ri, r, "Purchase has no valid date",
+                              "الشراء بدون تاريخ صالح")
+                    continue
+                sup = await supplier_id(g(r0, "supplier")) if g(r0, "supplier") else None
+                br = await branch_id(g(r0, "branch")) if g(r0, "branch") else None
+                items, total = [], Decimal("0")
+                for ri, r in lines:
+                    orig = row_map[ri] if ri < len(row_map) else ri
+                    q = _num(g(r, "quantity"))
+                    if q is None or q <= 0:
+                        _skip(orig, r, "Purchase line has no quantity", "سطر شراء بدون كمية")
+                        continue
+                    qd = Decimal(str(q))
+                    piece = _money(g(r, "unit_price"))  # the price of one piece, when the file gives it
+                    per = _money(g(r, "carton_price")) or piece or _money(g(r, "cost"))
+                    lt = _money(g(r, "total"))
+                    if lt is None or lt <= 0:
+                        lt = (qd * per).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP) if per else None
+                    if lt is None or lt <= 0:
+                        _skip(orig, r, "Purchase line has no price or total", "سطر شراء بدون سعر أو إجمالي")
+                        continue
+                    name = g(r, "product")
+                    existing = find_product(name, g(r, "barcode"))
+                    if existing:
+                        pid = existing["id"]
+                        # A piece price updates the item's cost (as a price list does). A carton
+                        # price doesn't: on one unit it made water "cost" 14.5 JD.
+                        if piece and piece > 0 and abs(piece - Decimal(str(existing["cost"] or 0))) > Decimal("0.0005"):
+                            old_costs.append((str(pid), float(existing["cost"] or 0)))
+                            await c.execute("update products set cost=$2 where id=$1", pid, piece)
+                            existing["cost"] = piece
+                            stats["products_updated"] += 1
+                    else:
+                        try:
+                            pid, _ = await product_id(name, 0, piece, g(r, "barcode"), g(r, "sku"), g(r, "category"))
+                        except SkippedRow as exc:
+                            _skip(orig, r, exc.reason, exc.reason_ar)
+                            continue
+                    unit_cost = (lt / qd).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                    items.append((pid, qd, unit_cost, lt))
+                    total += lt
+                if not items:
+                    continue
+                hid = uuid.uuid4()
+                pur_recs.append((hid, uuid.UUID(str(ctx.org_id)), br, sup, inv or None, ordered, ordered, total,
+                                 "received", g(r0, "notes")))
+                pitem_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), hid, p, q, uc, lt) for p, q, uc, lt in items)
+                purchase_ids.append(str(hid))
+            if pur_recs:
+                await c.copy_records_to_table("purchases", records=pur_recs, columns=[
+                    "id", "org_id", "branch_id", "supplier_id", "po_number", "ordered_at", "received_at", "total", "status", "notes"])
+                await c.copy_records_to_table("purchase_items", records=pitem_recs, columns=[
+                    "id", "org_id", "purchase_id", "product_id", "quantity", "unit_cost", "line_total"])
+            stats["purchases"] = len(pur_recs)
+            stats["purchase_lines"] = len(pitem_recs)
+            # Kept with the run (purchases have no upload_id) so undo and delete can remove them.
+            stats["purchase_ids"] = purchase_ids
+            stats["old_costs"] = old_costs
         elif entity == "customers":
+            updates = []
             for ri, r in enumerate(rows):
                 name, phone = g(r, "customer_name"), g(r, "phone")
                 if not name and not phone:
                     continue
                 if phone and phone in custs:
+                    # Already known (often created from sales with just a phone): fill in
+                    # what this list adds instead of skipping the row.
+                    updates.append((custs[phone], ctx.org_id, name, g(r, "email"), g(r, "city"), g(r, "area")))
                     continue
                 cid = await c.fetchval("""insert into customers(org_id,full_name,phone,email,city,area,first_seen,upload_id) values($1,$2,$3,$4,$5,$6,current_date,$7) returning id""",
                                        ctx.org_id, name or phone, phone, g(r, "email"), g(r, "city"), g(r, "area"), upload_id)
                 if phone:
                     custs[phone] = cid
                 stats["customers"] += 1
+            if updates:
+                await c.executemany(
+                    """update customers set full_name = case when (full_name = phone or full_name = '') and $3::text is not null
+                                                             then $3 else full_name end,
+                                            email = coalesce(email, $4), city = coalesce(city, $5), area = coalesce(area, $6)
+                       where id=$1 and org_id=$2""", updates)
+                stats["customers_updated"] = len(updates)
         elif entity in ("products", "supplier_prices"):
             old_costs, old_prices = [], []
+            supplier_links: list[tuple] = []
             main_branch: list = []  # cached on first use
 
             async def save_stock(r, pid):
@@ -1165,6 +1382,12 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         continue
                 if entity == "products":
                     await save_stock(r, pid)
+                if (sname := g(r, "supplier")) and (sid := await supplier_id(sname)):
+                    supplier_links.append((pid, sid, ctx.org_id))
+            if supplier_links:
+                # A menu's "default supplier": the item's supplier when it has none yet.
+                await c.executemany("update products set supplier_id=$2 where id=$1 and org_id=$3 and supplier_id is null",
+                                    supplier_links)
             stats["old_costs"] = old_costs
             stats["old_prices"] = old_prices
         learned = 0
@@ -1193,29 +1416,31 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             if bumps:
                 await c.executemany("update cleaning_rules set times_applied = times_applied + 1 where id=$1", bumps)
         await c.execute("update cleaning_changes set status='approved' where run_id=$1 and status='proposed'", run_id)
-        imported = stats["sales"] or stats["customers"] or (stats["products_created"] + stats["products_updated"])
+        imported = (stats["sales"] or stats["customers"] or stats.get("purchase_lines", 0)
+                    or (stats["products_created"] + stats["products_updated"]))
         # نُخزّن الصفوف المتخطّاة في stats حتى يقدر المستخدم ينزّلها كـ CSV.
         # قد تكون كبيرة، فنقصّها على 500 سبب مع عدّاد كلّي.
         skipped_blob = {"count": len(skipped), "items": skipped[:500]}
         await c.execute("update cleaning_runs set status='imported', imported_at=now(), reverted_at=null, stats = stats || $2 where id=$1",
-                        run_id, {"import": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned, "old_costs": stats.get("old_costs", []), "old_prices": stats.get("old_prices", []),
+                        run_id, {"import": {k: v for k, v in stats.items() if k not in _PRIVATE_STATS}, "learned_rules": learned, "old_costs": stats.get("old_costs", []), "old_prices": stats.get("old_prices", []), "purchase_ids": stats.get("purchase_ids", []),
+                                 "suppliers_created": stats.get("suppliers_created", []),
                                  "skipped": skipped_blob, "branches_created": branches_created,
                                  "employees_created": employees_created, "categories_created": categories_created,
                                  "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
-                                             "value": float(returns["value"])}})
+                                             "value": float(returns["value"]), "imported": True}})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
-                                                                                           **{k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}})
+                                                                                           **{k: v for k, v in stats.items() if k not in _PRIVATE_STATS}})
     await db.execute("insert into notifications(org_id,kind,title,link) values($1,'cleaning',$2,$3)", ctx.org_id,
                      f"{run['file_name']} cleaned & imported: {run['score_before']['score']:.0f} → {run['score_after']['score']:.0f}", f"/app/data/runs/{run_id}")
-    return {"ok": True, "imported": {k: v for k, v in stats.items() if k not in ("old_costs", "old_prices")}, "learned_rules": learned,
+    return {"ok": True, "imported": {k: v for k, v in stats.items() if k not in _PRIVATE_STATS}, "learned_rules": learned,
             "skipped": {"count": len(skipped), "sample": skipped[:20]},
             "branches_created": branches_created,
             "employees_created": employees_created,
             "categories_created": categories_created,
             "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
-                        "value": float(returns["value"])}}
+                        "value": float(returns["value"]), "imported": True}}
 
 
 @router.post("/runs/{run_id}/undo")
@@ -1231,6 +1456,7 @@ async def undo_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
         for pid, price in (run["stats"] or {}).get("old_prices", []):
             await c.execute("update products set price=$2 where id=$1 and org_id=$3", pid, price, ctx.org_id)
         await c.execute("delete from products p where p.upload_id=$1 and p.org_id=$2 and not exists (select 1 from sale_items si where si.product_id=p.id)", run["upload_id"], ctx.org_id)
+        await _remove_imported_purchases(c, ctx.org_id, run["stats"] or {})
         await c.execute("update cleaning_runs set status='reverted', reverted_at=now() where id=$1", run_id)
         await c.execute("update uploads set status='cleaned', imported_rows=0 where id=$1", run["upload_id"])
     db.cache_clear()
@@ -1316,6 +1542,7 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
             made_cats = _names("category")
     async with db.transaction() as c:
         sales_n = await c.execute("delete from sales where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
+        await _remove_imported_purchases(c, ctx.org_id, run_stats)
         cust_n = await c.execute("delete from customers where upload_id=$1 and org_id=$2", upload_id, ctx.org_id)
         # الأصناف اللي أنشأها هذا الملف فقط، وبدون استخدام في مبيعات أخرى.
         prod_n = await c.execute(
@@ -1352,6 +1579,7 @@ async def delete_upload(upload_id: str, ctx: Ctx = Depends(require("upload_data"
             if not left:
                 await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     db.cache_clear()
+    await _forget_file_memory(ctx.org_id, [exists["columns"] or []])
     counts = {"sales": _rowcount(sales_n), "customers": _rowcount(cust_n), "products": _rowcount(prod_n),
               "branches": _rowcount(br_n), "employees": _rowcount(emp_n), "categories": _rowcount(cat_n)}
     await db.audit(ctx.org_id, ctx.user.id, "upload.deleted", "upload", upload_id, counts)
@@ -1364,11 +1592,15 @@ async def delete_batch(batch_id: str, ctx: Ctx = Depends(require("upload_data"))
     b = await db.fetchrow("select id from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     if not b:
         raise HTTPException(404, "Batch not found")
-    ids = [str(r["id"]) for r in await db.fetch("select id from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)]
+    batch_uploads = await db.fetch("select id, columns from uploads where batch_id=$1 and org_id=$2", batch_id, ctx.org_id)
+    ids = [str(r["id"]) for r in batch_uploads]
     totals = {"sales": 0, "customers": 0, "products": 0, "files": 0}
     for uid in ids:
         async with db.transaction() as c:
             s = await c.execute("delete from sales where upload_id=$1 and org_id=$2", uid, ctx.org_id)
+            await _remove_imported_purchases(c, ctx.org_id, await c.fetchval(
+                "select stats from cleaning_runs where upload_id=$1 and org_id=$2 order by started_at desc limit 1",
+                uid, ctx.org_id) or {})
             cu = await c.execute("delete from customers where upload_id=$1 and org_id=$2", uid, ctx.org_id)
             p = await c.execute(
                 """delete from products p
@@ -1384,6 +1616,7 @@ async def delete_batch(batch_id: str, ctx: Ctx = Depends(require("upload_data"))
     async with db.transaction() as c:
         await c.execute("delete from import_batches where id=$1 and org_id=$2", batch_id, ctx.org_id)
     db.cache_clear()
+    await _forget_file_memory(ctx.org_id, [r["columns"] or [] for r in batch_uploads])
     await db.audit(ctx.org_id, ctx.user.id, "batch.deleted", "batch", batch_id, totals)
     return {"ok": True, "deleted": totals}
 

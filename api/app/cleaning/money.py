@@ -74,6 +74,11 @@ def detect(cols: dict[str, list[float | None]], products: list[str | None] | Non
     products: a grouping key per row (normalized product name) or None.
     quantity: parsed quantities per row, for checking line totals.
     """
+    # Returns are written negative ("-3250"): judge the size, keep the sign.
+    signs = {f: [-1.0 if v is not None and v < 0 else 1.0 for v in vals] for f, vals in cols.items()}
+    cols = {f: [abs(v) if v is not None else None for v in vals] for f, vals in cols.items()}
+    if quantity:
+        quantity = [abs(q) if q is not None else None for q in quantity]
     fixes: dict[str, dict[int, float]] = {f: {} for f in cols}
     review: dict[str, set[int]] = {f: set() for f in cols}
     n = max((len(v) for v in cols.values()), default=0)
@@ -153,4 +158,4 @@ def detect(cols: dict[str, list[float | None]], products: list[str | None] | Non
         for ri, v in enumerate(vals):
             if v is not None and ri not in fixes[f] and v >= m * OUTLIER and v >= MIN_FILS:
                 review[f].add(ri)
-    return fixes, review
+    return {f: {ri: v * signs[f][ri] for ri, v in d.items()} for f, d in fixes.items()}, review
