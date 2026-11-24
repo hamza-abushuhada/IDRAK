@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import statistics
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -13,6 +14,8 @@ from . import money as M
 from . import parsers as P
 from .arabic import clean_text, is_arabic, is_null, match_key, nums, place_key, skeleton, smart_title
 from .fields import REQUIRED, STANDS_IN, detect_entity, kind_of
+
+_PLAIN_NUMBER = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 RULES = {
     "arabic_digits": ("Arabic-Indic digits converted (١٢٣ → 123)", "تحويل الأرقام الهندية (١٢٣) إلى أرقام عادية", "standardize"),
@@ -385,6 +388,13 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
                         flags.append(Flag(ri, h, vals[ri], "qty_outlier"))
                 new = _fmt_num(v, kind == "money")
                 if rule is None and new != vals[ri]:
+                    if _PLAIN_NUMBER.fullmatch(vals[ri]) and float(vals[ri]) == v:
+                        # The same number, only written with fewer decimals ("3.25" vs
+                        # "3.250"): the cell reads the same on import. Kept as a change it
+                        # was a third of a big file's review list (152,000 cells out of
+                        # 470,000) and of what got saved.
+                        record(ri, ci, new, None)
+                        continue
                     rule = "money_format" if kind == "money" else "quantity_format"
                 record(ri, ci, new, rule, conf)
 
@@ -571,7 +581,10 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         ci = col_idx[h]
         # A value another column stands in for isn't missing: a sale's unit price
         # comes from its line total, a purchase's from the carton price or total.
-        stand_ins = [col_idx[x] for x, ff in fields.items() if ff in STANDS_IN.get((entity, f), ())]
+        # A category replaces the item only in a file with no item column at all
+        # (we are past that here: this column is the item), never row by row.
+        stand_ins = [] if (entity, f) == ("sales", "product") else \
+            [col_idx[x] for x, ff in fields.items() if ff in STANDS_IN.get((entity, f), ())]
         for ri in range(n):
             if ri in blank or ri in dup:
                 continue
