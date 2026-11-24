@@ -71,7 +71,7 @@ async def health_check(file: UploadFile = File(...)):
     if len(data) > 2 * 1024 * 1024:
         raise HTTPException(413, "File too large (max 2MB)")
     try:
-        headers, rows, _ = read_table(file.filename or "file.csv", data)
+        headers, rows, _ = read_table(file.filename or "file.csv", data, max_rows=1000, cut=True)
     except Exception as e:
         raise HTTPException(422, f"Could not read this file: {e}") from e
     if not headers or not rows:
