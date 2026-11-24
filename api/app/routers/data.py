@@ -1029,18 +1029,30 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     emp = await employee_id(g(r0, "cashier"), br)
                     cust = custs.get(g(r0, "phone") or "")
                     items, subtotal = [], Decimal("0")
-                    disc_lines, has_pct, saw_negative = Decimal("0"), False, False
+                    ret_items, ret_total = [], Decimal("0")
+                    disc_lines, has_pct = Decimal("0"), False
                     for _ri, r in lines:
                         name = g(r, "product")
                         q = _num(g(r, "quantity"))
                         p = _num(g(r, "unit_price"))
                         t = _num(g(r, "total"))
                         cost = _num(g(r, "cost"))
+                        if name and q is not None and -200 <= q < 0:
+                            # A negative quantity is a return. It used to be dropped (and its
+                            # value read from the raw total, fils and all: "183,155 JD").
+                            # Now it's kept as a "returned" sale, valued at |quantity| x price.
+                            rq = -q
+                            rp = abs(p) if p is not None else (abs(t) / rq if t is not None else None)
+                            rprice = _money(rp) if rp is not None else None
+                            if rprice is None or rprice <= 0:
+                                continue
+                            rpid, rcost = await product_id(name, rprice, abs(cost) if cost is not None else None,
+                                                          g(r, "barcode"), g(r, "sku"), g(r, "category"))
+                            rlt = (Decimal(str(rq)) * rprice).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                            ret_items.append((rpid, Decimal(str(rq)), rprice, rcost, rlt, Decimal("0")))
+                            ret_total += rlt
+                            continue
                         if not name or q is None or q <= 0 or q > 200:
-                            if q is not None and q < 0:
-                                saw_negative = True
-                                returns["lines"] += 1
-                                returns["value"] += abs(_money(g(r, "total")) or Decimal("0"))
                             continue
                         if p is None and t is not None:
                             p = t / q
@@ -1068,17 +1080,26 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         disc_lines += d_amt
                         subtotal += lt
                         items.append((pid, Decimal(str(q)), price, cost, lt, d_amt))
-                    if not items:
-                        if saw_negative:
-                            returns["invoices"] += 1
+                    if not items and not ret_items:
                         continue
-                    sid = uuid.uuid4()
                     pm = g(r0, "payment_method")
                     if pm not in _PAYMENTS:
                         # A missing or unknown payment method is still a sale: it's
                         # kept as "other" (shown as "not recorded"), not dropped.
                         pm = "other"
                         stats["payment_other"] = stats.get("payment_other", 0) + 1
+                    if ret_items:
+                        rid = uuid.uuid4()
+                        sale_recs.append((rid, uuid.UUID(str(ctx.org_id)), br, emp, cust, inv, sold, ret_total, Decimal("0"),
+                                          Decimal("0"), ret_total, pm, "returned", upload_id))
+                        item_recs.extend((uuid.uuid4(), uuid.UUID(str(ctx.org_id)), rid, pid, q, p, cost, d_amt, lt)
+                                         for pid, q, p, cost, lt, d_amt in ret_items)
+                        returns["invoices"] += 1
+                        returns["lines"] += len(ret_items)
+                        returns["value"] += ret_total
+                    if not items:
+                        continue
+                    sid = uuid.uuid4()
                     contract = run["batch_contract"] or {}
                     # لو الملف يحمل نسباً، مجموع خصومات البنود هو خصم الفاتورة.
                     discount = disc_lines if has_pct else (_money(g(r0, "discount") or 0) or Decimal("0"))
@@ -1232,7 +1253,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                                  "skipped": skipped_blob, "branches_created": branches_created,
                                  "employees_created": employees_created, "categories_created": categories_created,
                                  "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
-                                             "value": float(returns["value"])}})
+                                             "value": float(returns["value"]), "imported": True}})
         await c.execute("update uploads set status='imported', imported_rows=$2 where id=$1", upload_id, imported)
     db.cache_clear()
     await db.audit(ctx.org_id, ctx.user.id, "cleaning.applied", "upload", str(upload_id), {"file": run["file_name"], "skipped": len(skipped),
@@ -1245,7 +1266,7 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             "employees_created": employees_created,
             "categories_created": categories_created,
             "returns": {"lines": returns["lines"], "invoices": returns["invoices"],
-                        "value": float(returns["value"])}}
+                        "value": float(returns["value"]), "imported": True}}
 
 
 @router.post("/runs/{run_id}/undo")

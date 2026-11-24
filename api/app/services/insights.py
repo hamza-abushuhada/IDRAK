@@ -67,6 +67,8 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
                    (select count(*) from s where status='completed') tx,
                    (select coalesce(sum(discount),0) from s where status='completed') discounts,
                    (select count(*) from s where status='void') voids,
+                   (select count(*) from s where status='returned') returns,
+                   (select coalesce(sum(total),0) from s where status='returned') returns_value,
                    (select count(distinct customer_id) from s where status='completed') customers,
                    (select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si join s on s.id=si.sale_id where s.status='completed') profit,
                    (select coalesce(sum(si.quantity),0) from sale_items si join s on s.id=si.sale_id where s.status='completed') units

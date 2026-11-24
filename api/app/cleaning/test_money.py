@@ -41,6 +41,12 @@ class Detect(unittest.TestCase):
         fixes, _ = detect({"unit_price": [3.95, 3950.0], "total": [15.8, 15800.0]}, ["b", "b"], [4.0, 4.0])
         self.assertEqual(fixes["total"], {1: 15.8})
 
+    def test_returns_written_negative_in_fils_keep_their_sign(self):
+        # A return's total "-3250" read as dinars made a 183,155 JD "returns" figure.
+        fixes, _ = detect({"unit_price": [3.25, 3.25, 3.25], "total": [3.25, -3250.0, 6.5]}, ["z", "z", "z"],
+                          [1.0, -1.0, 2.0])
+        self.assertEqual(fixes["total"], {1: -3.25})
+
     def test_far_out_values_without_evidence_are_flagged_not_changed(self):
         vals = [5.0, 6.0, 4.5, 5.5, 900000.0]
         fixes, review = detect({"discount": vals})
