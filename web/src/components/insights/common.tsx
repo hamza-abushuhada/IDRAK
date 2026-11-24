@@ -88,6 +88,7 @@ export const isWeekend = (dow: number) => dow === 5 || dow === 6;
 export function paymentLabel(m: string, isAr: boolean) {
   const map: Record<string, [string, string]> = {
     cash: ["Cash", "كاش"], card: ["Card", "بطاقة"], cliq: ["CliQ", "كليك"], wallet: ["E-wallet", "محفظة إلكترونية"], credit: ["On account", "دين"],
+    online: ["Online", "أونلاين"], other: ["Not recorded", "غير مسجّلة"],
   };
   const v = map[m];
   return v ? (isAr ? v[1] : v[0]) : m;

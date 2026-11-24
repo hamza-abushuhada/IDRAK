@@ -8,7 +8,11 @@ DIACRITICS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭ]")
 TATWEEL = "ـ"
 ARABIC_CHARS = re.compile(r"[؀-ۿ]")
 NULL_TOKENS = {"", "-", "--", "—", "n/a", "na", "null", "none", "nil", "nan", "?", "؟", "لا يوجد", "غير معروف",
-               "unknown", "#n/a", "#value!", "0000-00-00", "x"}
+               "unknown", "#n/a", "#value!", "0000-00-00", "x",
+               # "Not specified / not available": a cost written "غير محدد" was an
+               # "unreadable number" and dropped the whole invoice.
+               "غير محدد", "غير محددة", "غير متوفر", "غير متوفرة", "غير متاح", "غير مسجل",
+               "tbd", "n.a", "n.a.", "not available", "not set", "..."}
 
 UNIT_MAP = [
     (r"\b(مل|ملل|مللي|ملي)\b", "ml"), (r"\b(لتر|ليتر|لترات)\b", "l"), (r"\b(غم|غرام|جرام|جم|غ)\b", "g"),

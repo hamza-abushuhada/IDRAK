@@ -518,9 +518,7 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
     memory_hits = sum(1 for c in res["changes"] if c["rule"] == "memory")
     # الصنف غير الموجود ليس سبباً لتخطّي الصف: الاستيراد ينشئه.
     # كان هنا فكانت كل صفوف ملف فيه أصناف جديدة تُتخطّى.
-    blocking_reasons = {"missing_total", "total_mismatch", "invalid_date", "invalid_number",
-                    "unknown_payment", "missing_required", "future_date"}
-    blocking_flags = [f for f in res["flags"] if f["reason"] in blocking_reasons]
+    blocking_flags = [f for f in res["flags"] if _blocks(f, mapping.get)]
     stats = {"rows_before": res["rows_before"], "rows_after": res["rows_after"], "issues": res["issues"], "clusters": res["clusters"],
              "flags": res["flags"][:500], "flag_count": len(res["flags"]),
              "blocking_flags": blocking_flags[:500], "blocking_flag_count": len(blocking_flags),
@@ -703,6 +701,23 @@ def _money(v) -> Decimal | None:
         return None
 
 
+# What keeps a sales row out of the import. A missing or mismatched line total, an
+# unreadable cost or tax, or an unknown payment method don't: the import computes the
+# line from quantity x price, takes a product's cost from its other rows and records
+# the payment as "other". Each of those used to drop the whole invoice (408 rows of
+# one restaurant file).
+_BLOCKING = {"invalid_date", "missing_required", "future_date"}
+_ESSENTIAL_NUMBERS = {"quantity", "unit_price"}
+_PAYMENTS = ("cash", "card", "cliq", "wallet", "online")
+
+
+def _blocks(flag: dict, field_of) -> bool:
+    """Does this cleaning flag keep its row out of a sales import? field_of: column -> field."""
+    if flag.get("reason") in _BLOCKING:
+        return True
+    return flag.get("reason") == "invalid_number" and field_of(flag.get("column")) in _ESSENTIAL_NUMBERS
+
+
 class SkippedRow(Exception):
     """تُرفع داخليّاً لتخطّي صفّ واحد أثناء الاستيراد مع الاحتفاظ بالسبب.
 
@@ -763,8 +778,13 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
             "missing_required": ("A required value is missing", "قيمة أساسية ناقصة"),
             "future_date": ("Date is in the future", "تاريخ بالمستقبل"),
         }
+        def field_of(col):
+            return ((run["mapping"] or {}).get(col) or {}).get("field")
+
         for f in (run["stats"] or {}).get("blocking_flags", []):
             if (f.get("row"), f.get("column")) in approved_cells:
+                continue
+            if not _blocks(f, field_of):  # runs cleaned before these rules stored more flags
                 continue
             entry = reason_labels.get(f.get("reason"), (f.get("reason"), f.get("reason")))
             blocked_reasons.setdefault(f.get("row"), entry)
@@ -781,6 +801,16 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
     # لو الملف ما فيه عمود تكلفة، لا نرمي الصفوف: ننشئ الصنف بتكلفة 0
     # ونعدّها، وننبّه إن الربح ما بينحسب إلا بعد ما تُدخل التكاليف.
     has_cost_col = "cost" in fmap
+    # A product's cost from all its rows in this file. A new product whose row had
+    # no cost ("غير محدد") dropped that row, though its other rows had one.
+    file_costs: dict[str, Decimal] = {}
+    if has_cost_col:
+        by_name: dict[str, list[Decimal]] = defaultdict(list)
+        for r in rows:
+            nm, cv = g(r, "product"), _money(g(r, "cost"))
+            if nm and cv is not None and cv >= 0:
+                by_name[match_key(nm)].append(cv)
+        file_costs = {k: sorted(v)[len(v) // 2] for k, v in by_name.items()}
     # الفروع اللي أنشأها الاستيراد تلقائياً (اسم الفرع ظهر بالملف وما كان موجود).
     branches_created: list[str] = []
     # المرتجعات (كمية سالبة) لا تُستورد: قيمتها سالبة وتقلب الإيراد والربح،
@@ -915,27 +945,25 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         existing["category_id"] = cid
                 return pid_e, existing["cost"]
             if cost is None:
-                if not has_cost_col:
-                    # الملف كله بلا تكلفة — ننشئ الصنف ونكمل، والتنبيه
-                    # يطلع بالملخّص بدل ما نضيّع كل المبيعات.
-                    stored_barcode0 = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
-                    cid0 = await category_id(category) if category else None
-                    pid0 = await c.fetchval(
-                        "insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id)"
-                        " values($1,$2,$3,$4,$5,0,$6,$7) returning id",
-                        ctx.org_id, name, sku, stored_barcode0, price or 0, upload_id, cid0)
-                    product = {"id": pid0, "name": name, "cost": 0, "price": price,
-                               "barcode": stored_barcode0, "sku": sku, "category_id": cid0}
-                    names[k].append(product)
-                    if stored_barcode0:
-                        barcodes[stored_barcode0].append(product)
-                    stats["products_created"] += 1
-                    stats["products_no_cost"] += 1
-                    return pid0, 0
-                raise SkippedRow(
-                    f"Unknown product has no cost: {name}. Add it to the catalog or include a cost column",
-                    f"صنف جديد بدون تكلفة: {name}. أضفه للكتالوج أو ضمّن عمود تكلفة",
-                )
+                cost = file_costs.get(k)  # the same product's cost on its other rows
+            if cost is None:
+                # بلا تكلفة بالملف كله لهالصنف — ننشئه بتكلفة 0 ونكمل، والتنبيه
+                # يطلع بالملخّص بدل ما نضيّع مبيعاته. (كان يتخطّى الصف لما يكون
+                # بالملف عمود تكلفة، حتى لو القيمة بس ناقصة بهالسطر.)
+                stored_barcode0 = re.sub(r"\D", "", barcode) if barcode and _valid_barcode(barcode) else None
+                cid0 = await category_id(category) if category else None
+                pid0 = await c.fetchval(
+                    "insert into products(org_id,name,sku,barcode,price,cost,upload_id,category_id)"
+                    " values($1,$2,$3,$4,$5,0,$6,$7) returning id",
+                    ctx.org_id, name, sku, stored_barcode0, price or 0, upload_id, cid0)
+                product = {"id": pid0, "name": name, "cost": 0, "price": price,
+                           "barcode": stored_barcode0, "sku": sku, "category_id": cid0}
+                names[k].append(product)
+                if stored_barcode0:
+                    barcodes[stored_barcode0].append(product)
+                stats["products_created"] += 1
+                stats["products_no_cost"] += 1
+                return pid0, 0
             cost = _money(cost)
             if cost is None or cost < 0:
                 raise SkippedRow(
@@ -1046,9 +1074,11 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                         continue
                     sid = uuid.uuid4()
                     pm = g(r0, "payment_method")
-                    if pm not in ("cash", "card", "cliq", "wallet", "online"):
-                        raise SkippedRow(f"Invoice {inv}: unknown or missing payment method ({pm or 'empty'})",
-                                         f"الفاتورة {inv}: طريقة دفع غير معروفة أو مفقودة ({pm or 'فارغ'})", ri0)
+                    if pm not in _PAYMENTS:
+                        # A missing or unknown payment method is still a sale: it's
+                        # kept as "other" (shown as "not recorded"), not dropped.
+                        pm = "other"
+                        stats["payment_other"] = stats.get("payment_other", 0) + 1
                     contract = run["batch_contract"] or {}
                     # لو الملف يحمل نسباً، مجموع خصومات البنود هو خصم الفاتورة.
                     discount = disc_lines if has_pct else (_money(g(r0, "discount") or 0) or Decimal("0"))
