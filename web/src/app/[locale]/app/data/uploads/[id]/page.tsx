@@ -172,8 +172,8 @@ export default function MappingPage() {
   const reasonText = (r: EntityReason) => {
     switch (r.code) {
       case "purchase_guard":
-        return tx("The column names say these are purchases from a supplier, not sales. Idrak will only update your item costs from it.",
-                  "أسماء الأعمدة بتقول إنها مشتريات من مورد مش مبيعات. إدراك رح يحدّث تكلفة الأصناف منه بس.");
+        return tx("The column names say these are purchases from a supplier, not sales: Idrak records them as purchases (suppliers, invoices, item costs).",
+                  "أسماء الأعمدة بتقول إنها مشتريات من مورد مش مبيعات: إدراك بيسجّلها كمشتريات (الموردين والفواتير وتكلفة الأصناف).");
       case "waste_guard":
         return tx("This looks like a waste or spoilage log. Idrak doesn't import waste yet, so nothing will be imported from it.",
                   "شكله سجل هدر وتالف. إدراك لسا ما بيستورد الهدر، فما رح ينستورد منه إشي.");

@@ -23,7 +23,7 @@ type Batch = { id: string; status: string; contract: Contract; link_report: Repo
 
 const ENTITY: Record<string, [string, string]> = {
   sales: ["Sales", "مبيعات"], products: ["Products & inventory", "أصناف ومخزون"], customers: ["Customers", "زبائن"],
-  supplier_prices: ["Supplier prices", "أسعار موردين"], unknown: ["Needs mapping", "بحاجة لربط الأعمدة"],
+  supplier_prices: ["Supplier prices", "أسعار موردين"], purchases: ["Purchases", "مشتريات"], unknown: ["Needs mapping", "بحاجة لربط الأعمدة"],
 };
 
 export default function BatchPage() {

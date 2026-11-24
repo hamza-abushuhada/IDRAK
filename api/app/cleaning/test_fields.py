@@ -110,7 +110,7 @@ class RestaurantExport(unittest.TestCase):
         m = fields_of(self.PURCHASES)
         self.assertEqual(m["اسم المورد"], "supplier")
         self.assertNotIn("customer_name", m.values())
-        self.assertEqual(entity_of(self.PURCHASES), "supplier_prices")
+        self.assertEqual(entity_of(self.PURCHASES), "purchases")
 
     def test_waste_log_is_never_sales(self):
         self.assertEqual(entity_of(self.WASTE), "unknown")
@@ -246,7 +246,7 @@ class EntityNeedsConfirmation(unittest.TestCase):
 
     def test_purchase_invoices_ask_because_the_guard_fired(self):
         c = check_of(RestaurantExport.PURCHASES)
-        self.assertEqual(c["detected"], "supplier_prices")
+        self.assertEqual(c["detected"], "purchases")
         self.assertTrue(c["needs_confirmation"])
         self.assertEqual(c["reasons"][0], {"code": "purchase_guard", "instead_of": "sales"})
         self.assertNotIn("sales", c["suggested"])  # the misreading the guard prevents is never suggested
@@ -266,7 +266,7 @@ class EntityNeedsConfirmation(unittest.TestCase):
         c = check_of(["Invoice No", "Date", "Item", "Qty", "Price", "Cashier", "Supplier"])
         self.assertEqual(c["detected"], "sales")
         self.assertEqual(c["reasons"], [{"code": "mixed_signals", "signal": "purchase"}])
-        self.assertEqual(c["suggested"], ["supplier_prices"])
+        self.assertEqual(c["suggested"], ["purchases"])
 
     def test_missing_required_field(self):
         c = check_of(["Invoice No", "Item", "Qty", "Price"])  # sales without a date
@@ -309,13 +309,13 @@ class EntityConfirmationState(unittest.TestCase):
         s = entity_state(self.H, auto_map(self.H))
         self.assertTrue(s["blocked"])
         self.assertIsNone(s["confirmed"])
-        self.assertEqual(s["entity"], "supplier_prices")
+        self.assertEqual(s["entity"], "purchases")
 
     def test_confirmation_unblocks_and_the_users_choice_wins(self):
         s = entity_state(self.H, self.stored("supplier_prices"))
         self.assertEqual((s["blocked"], s["entity"]), (False, "supplier_prices"))
         s = entity_state(self.H, self.stored("unknown"))
-        self.assertEqual((s["blocked"], s["entity"], s["detected"]), (False, "unknown", "supplier_prices"))
+        self.assertEqual((s["blocked"], s["entity"], s["detected"]), (False, "unknown", "purchases"))
 
     def test_confirmation_expires_when_the_mapping_changes(self):
         mapping = self.stored("supplier_prices")

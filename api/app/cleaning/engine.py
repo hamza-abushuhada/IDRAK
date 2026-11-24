@@ -12,7 +12,7 @@ from . import bilingual as B
 from . import money as M
 from . import parsers as P
 from .arabic import clean_text, is_arabic, is_null, match_key, nums, place_key, skeleton, smart_title
-from .fields import REQUIRED, detect_entity, kind_of
+from .fields import REQUIRED, STANDS_IN, detect_entity, kind_of
 
 RULES = {
     "arabic_digits": ("Arabic-Indic digits converted (١٢٣ → 123)", "تحويل الأرقام الهندية (١٢٣) إلى أرقام عادية", "standardize"),
@@ -569,12 +569,13 @@ def run(headers: list[str], rows: list[list], mapping: dict[str, str | None], ct
         if h is None:
             continue
         ci = col_idx[h]
-        # A sale's unit price can come from its line total (total / quantity).
-        stand_in = ti if entity == "sales" and f == "unit_price" else None
+        # A value another column stands in for isn't missing: a sale's unit price
+        # comes from its line total, a purchase's from the carton price or total.
+        stand_ins = [col_idx[x] for x, ff in fields.items() if ff in STANDS_IN.get((entity, f), ())]
         for ri in range(n):
             if ri in blank or ri in dup:
                 continue
-            if not clean[ri][ci] and not (stand_in is not None and clean[ri][stand_in]):
+            if not clean[ri][ci] and not any(clean[ri][si] for si in stand_ins):
                 flags.append(Flag(ri, h, "", "missing_required"))
 
     removed = blank | dup
