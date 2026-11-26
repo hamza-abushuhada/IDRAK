@@ -1,7 +1,7 @@
 [project]
 name = "idrak-api"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi==0.115.6",
     "uvicorn[standard]==0.32.1",
@@ -17,3 +17,9 @@ dependencies = [
     "hijridate==2.5.0",
     "xlrd==2.0.2",
 ]
+
+[tool.vercel]
+entrypoint = "app.main:app"
+
+[tool.vercel.scripts]
+build = "python staging_smoke.py"

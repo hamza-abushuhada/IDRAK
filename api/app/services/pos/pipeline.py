@@ -70,8 +70,16 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
         from . import lab
         # السرّ يُقرأ من البيئة (لا يُخزَّن في config/قاعدة): نفس سرّ المختبر المحلّي.
         secret = os.environ.get("IDRAK_LAB_WEBHOOK_SECRET") or lab.DEFAULT_SECRET
+        authorization = None
+        if os.environ.get("IDRAK_ENVIRONMENT") == "staging":
+            user = os.environ.get("IDRAK_LAB_ACCESS_USER", "lab")
+            password = os.environ.get("IDRAK_LAB_ACCESS_PASSWORD")
+            if password:
+                import base64
+                authorization = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
         return cls(base_url=cfg.get("base_url") or lab.DEFAULT_BASE_URL,
-                   secret=secret, branch=cfg.get("branch_name") or lab.DEFAULT_BRANCH)
+                   secret=secret, branch=cfg.get("branch_name") or lab.DEFAULT_BRANCH,
+                   authorization=authorization)
     return cls()
 
 

@@ -1,5 +1,6 @@
 """HTTP regressions; mocked DB only, no lifespan/background sync or credentials."""
 import unittest
+import os
 from unittest.mock import AsyncMock, patch
 
 from asyncpg import UndefinedTableError, UndefinedColumnError, InvalidColumnReferenceError
@@ -9,6 +10,8 @@ from app import db
 from app.auth import Ctx, User, org_ctx
 from app.main import app
 from app.config import settings
+from app.routers.integrations import _config_for
+from app.services.pos.pipeline import build_adapter
 
 
 class ConnectReadTests(unittest.TestCase):
@@ -59,3 +62,15 @@ class ConnectReadTests(unittest.TestCase):
         with patch.object(db, "fetchrow", new=AsyncMock()) as fetch:
             self.assertEqual(self.client.post("/integrations/connections/id/sync").status_code, 403)
         fetch.assert_not_awaited()
+
+    def test_remote_lab_configuration_requires_staging(self):
+        env = {"IDRAK_LAB_BASE_URL": "https://isolated-lab.example.test",
+               "IDRAK_LAB_ACCESS_PASSWORD": "temporary-password"}
+        with patch.dict(os.environ, {**env, "IDRAK_ENVIRONMENT": "production"}):
+            self.assertEqual(_config_for("lab_pos")["base_url"], "http://127.0.0.1:8765")
+            adapter = build_adapter({"provider_code": "lab_pos", "config": {}}, "org")
+            self.assertIsNone(adapter.authorization)
+        with patch.dict(os.environ, {**env, "IDRAK_ENVIRONMENT": "staging"}):
+            self.assertEqual(_config_for("lab_web")["base_url"], env["IDRAK_LAB_BASE_URL"])
+            adapter = build_adapter({"provider_code": "lab_web", "config": {}}, "org")
+            self.assertTrue(adapter.authorization.startswith("Basic "))
