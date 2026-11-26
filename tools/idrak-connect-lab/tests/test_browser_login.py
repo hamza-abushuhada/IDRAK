@@ -22,6 +22,7 @@ class BrowserLoginTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.patches = [patch.object(lab, 'SOURCE_DB', root / 's.db'),
                         patch.object(lab, 'RECEIVER_DB', root / 'r.db'), patch.object(lab, 'DATA', root),
+                        patch.object(lab, 'SIGNING_SECRET', 'test-signing-secret-long-and-distinct'),
                         patch.object(pg, 'install'), patch.dict(os.environ, {
                             'IDRAK_LAB_ACCESS_PASSWORD': 'test-operator-password-long',
                             'IDRAK_LAB_WEBHOOK_SECRET': 'test-signing-secret-long-and-distinct'})]

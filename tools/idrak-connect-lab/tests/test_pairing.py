@@ -19,6 +19,10 @@ class PairingTests(Base):
         self.env = patch.dict(os.environ, {'IDRAK_LAB_PAIRING_KEY': 'pairing-test-only-' + 'k' * 40})
         self.env.start()
         self.addCleanup(self.env.stop)
+        # Pairing requires a deployment-specific signing secret (never the public default).
+        self.secret = patch.object(lab, 'SIGNING_SECRET', 'signing-test-only-' + 's' * 40)
+        self.secret.start()
+        self.addCleanup(self.secret.stop)
         lab.init_db()
         self.a, self.b = lab.create_shop('A'), lab.create_shop('B')
         self.pa = lab.Principal('shop', self.a['shop_id'])
@@ -81,6 +85,49 @@ class PairingTests(Base):
             with self.assertRaises(lab.LabAuthError) as caught:
                 pairing.issue(self.pa, intent)
             self.assertEqual(caught.exception.status, 503)
+
+    def test_pairing_refuses_known_or_weak_signing_secret(self):
+        # The per-shop webhook key returned to IDRAK derives from SIGNING_SECRET,
+        # so a public/short secret must stop both code issue and exchange.
+        intent = self.intent()
+        code = pairing.issue(self.pa, intent)['code']
+        for unsafe in (lab.DEFAULT_SIGNING_SECRET, 'x' * 31):
+            with patch.object(lab, 'SIGNING_SECRET', unsafe):
+                with self.assertRaises(lab.LabAuthError) as caught:
+                    pairing.issue(self.pa, intent)
+                self.assertEqual(caught.exception.status, 503)
+                with self.assertRaises(lab.LabAuthError) as caught:
+                    pairing.exchange(b'{}', 'LabPairing x')
+                self.assertEqual(caught.exception.status, 503)
+        # A pairing key reused as the signing secret or access password is rejected too.
+        for reused in (lab.SIGNING_SECRET, 'access-password-' + 'p' * 30):
+            with patch.dict(os.environ, {'IDRAK_LAB_PAIRING_KEY': reused, 'IDRAK_LAB_ACCESS_PASSWORD': 'access-password-' + 'p' * 30}):
+                with self.assertRaises(lab.LabAuthError):
+                    pairing.key()
+        # With a safe secret, the code issued earlier still redeems normally.
+        self.assertEqual(self.exchange(code, intent)['shop_id'], self.a['shop_id'])
+
+    def test_serverless_entrypoint_refuses_unsafe_signing_secret(self):
+        import importlib
+        import sys
+        safe = {'IDRAK_LAB_DATABASE_URL': 'postgresql://lab@127.0.0.1/idrak_lab_test_unused',
+                'IDRAK_LAB_ISOLATED_DATABASE': 'yes', 'IDRAK_LAB_ACCESS_PASSWORD': 'access-test-' + 'a' * 30}
+        saved_connect = lab.connect
+        try:
+            for secret in ('', lab.DEFAULT_SIGNING_SECRET, 'short'):
+                env = {**safe, **({'IDRAK_LAB_WEBHOOK_SECRET': secret} if secret else {})}
+                with patch.dict(os.environ, env, clear=True), patch.object(lab, 'SIGNING_SECRET', secret or lab.DEFAULT_SIGNING_SECRET):
+                    sys.modules.pop('serverless_app', None)
+                    with self.assertRaises(ValueError):
+                        importlib.import_module('serverless_app')
+            good = 'webhook-test-' + 'w' * 40
+            with patch.dict(os.environ, {**safe, 'IDRAK_LAB_WEBHOOK_SECRET': good}, clear=True), patch.object(lab, 'SIGNING_SECRET', good):
+                sys.modules.pop('serverless_app', None)
+                self.assertTrue(hasattr(importlib.import_module('serverless_app'), 'app'))
+        finally:
+            sys.modules.pop('serverless_app', None)
+            lab.connect = saved_connect  # install() swaps in the PostgreSQL backend
+            lab.post_signed = __import__('hosted_server').deliver_to_simulator
 
     def test_integration_credential_is_read_only_and_scoped(self):
         intent = self.intent()

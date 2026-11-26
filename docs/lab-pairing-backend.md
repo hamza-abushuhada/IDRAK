@@ -51,6 +51,23 @@ Automatic transfer to another organization is deliberately unavailable.
   offline using `Fernet.generate_key()`. Keep it outside the database and source
   control, and distinct from the pairing key. Losing it requires re-pairing;
   changing it requires re-encryption or re-pairing. Missing keys fail closed.
+- The Lab refuses to pair unless its `IDRAK_LAB_WEBHOOK_SECRET` is deployment
+  specific (at least 32 characters, never the localhost demo default), because
+  each shop's webhook key handed to IDRAK is derived from it. The hosted and
+  serverless entry points already refuse to start without it.
+- **Lab origin.** Production leaves `IDRAK_LAB_ORIGIN` (API) and
+  `NEXT_PUBLIC_LAB_URL` (web) unset, so both use the published Lab. An isolated
+  staging stack points at its own Lab by setting `IDRAK_LAB_ORIGIN` /
+  `NEXT_PUBLIC_LAB_URL` and listing that exact origin in
+  `IDRAK_LAB_ALLOWED_ORIGINS` / `NEXT_PUBLIC_LAB_ALLOWED_ORIGINS` (comma
+  separated, no wildcards). Origins must be bare `https://host` names: no
+  credentials, path, query, port other than 443, IP literals or local/reserved
+  hostnames. Any invalid value fails closed (pairing returns 503, the web link
+  is hidden); nothing falls back to another Lab. Paired connections store the
+  origin they were paired with. If the configured origin later changes, sync
+  stops and the shop must be paired again, so credentials only ever go to the
+  Lab that issued them. Staging must use its own pairing key and must not be a
+  Preview of the production projects, which share production variables.
 - IDRAK's new additive migration is `api/db/migrations/011_lab_pairing.sql`.
   **007–010 are already applied in production; do not reapply them based on old
   reports.** No migration runner was used against a published database.

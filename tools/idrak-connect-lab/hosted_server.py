@@ -23,8 +23,12 @@ def validate_settings():
         raise ValueError('Set IDRAK_LAB_ACCESS_PASSWORD to a separate random value of at least 20 characters')
     if len(secret) < 32:
         raise ValueError('Set IDRAK_LAB_WEBHOOK_SECRET to a separate random value of at least 32 characters')
-    if secret == 'idrak-local-demo-only-secret' or secret == password:
+    if secret == lab.DEFAULT_SIGNING_SECRET or secret == password:
         raise ValueError('Use distinct, non-default access and signing secrets')
+    # Validate the value actually used for signing, not only the environment:
+    # demo_server reads it once at import.
+    if not lab.signing_secret_is_safe() or not hmac.compare_digest(lab.SIGNING_SECRET, secret):
+        raise ValueError('The effective Lab signing secret does not match IDRAK_LAB_WEBHOOK_SECRET')
     return os.environ.get('IDRAK_LAB_ACCESS_USER', 'lab'), password
 
 

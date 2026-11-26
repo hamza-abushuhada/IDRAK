@@ -69,11 +69,19 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
         cfg = connection.get("config") or {}
         from . import lab
         if cfg.get('paired_lab'):
-            from .pairing import LAB_ORIGIN
+            from .pairing import lab_origin
             credentials = connection.get('_lab_credentials')
             if not credentials or credentials['org_id'] != str(org_id) or credentials['shop_id'] != connection['account_ref']:
                 raise ValueError('Paired Lab credentials unavailable')
-            return cls(base_url=LAB_ORIGIN, secret=credentials['webhook_secret'],
+            try:
+                origin = lab_origin()
+            except ValueError:
+                raise ValueError('Lab origin is not configured') from None
+            # Credentials are only ever sent to the Lab that issued them. If the
+            # configured origin changed since pairing, stop and require re-pairing.
+            if cfg.get('base_url') != origin:
+                raise ValueError('Paired Lab origin changed; pair the shop again')
+            return cls(base_url=origin, secret=credentials['webhook_secret'],
                        account_ref=connection['account_ref'], authorization='Bearer ' + credentials['token'],
                        branch=cfg.get('branch_name') or ('Lab ' + connection['account_ref']))
         # السرّ يُقرأ من البيئة (لا يُخزَّن في config/قاعدة): نفس سرّ المختبر المحلّي.
