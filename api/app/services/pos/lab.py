@@ -101,12 +101,14 @@ class _LabAdapter(adapter.POSAdapter):
         initial_import=True, incremental=True, refunds=True, inventory=True, webhook=True)
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, secret: str = DEFAULT_SECRET,
-                 branch: str = DEFAULT_BRANCH, transport=None, authorization: str | None = None):
+                 branch: str = DEFAULT_BRANCH, transport=None, authorization: str | None = None,
+                 account_ref: str | None = None):
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.secret = secret or DEFAULT_SECRET
         self.branch = branch or DEFAULT_BRANCH
         self._transport = transport  # قابل للحقن في الاختبار: fn(url)->dict
         self.authorization = authorization
+        self.account_ref = account_ref
 
     # -- الجلب عبر HTTP (مصدر محلّي؛ مهلة قصيرة) -------------------------
     def _get(self, after: int, limit: int = 100) -> dict:
@@ -118,8 +120,31 @@ class _LabAdapter(adapter.POSAdapter):
         if self.authorization:
             headers["Authorization"] = self.authorization
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (127.0.0.1 only)
+        if self.account_ref:
+            # Never forward a shop credential to a redirect target.
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    return None
+            try:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+                with opener.open(req, timeout=5) as r:
+                    raw = r.read(2_000_001)
+                    if len(raw) > 2_000_000:
+                        raise ValueError()
+                    return json.loads(raw or '{}')
+            except Exception:
+                raise ValueError('Paired Lab event source unavailable') from None
+        with urllib.request.urlopen(req, timeout=5) as r:
             return json.loads(r.read() or "{}")
+
+    def _owns_payload(self, payload):
+        if self.account_ref is None:
+            return True  # Preserve existing local/legacy connections.
+        if not isinstance(payload, dict) or not isinstance(payload.get('source'), dict):
+            return False
+        source = payload['source']
+        expected = 'idrak-lab-pos' if self.channel == 'pos' else 'idrak-lab-store'
+        return source.get('account_id') == self.account_ref and source.get('channel') == self.channel and source.get('system') == expected
 
     def _pull(self, after: int) -> tuple[list, int]:
         """يسحب كل الصفحات بعد المؤشّر، ويُرجِع (أحداث، المؤشّر التالي)."""
@@ -129,7 +154,10 @@ class _LabAdapter(adapter.POSAdapter):
             data = self._get(cursor)
             rows = data.get("events") or []
             for row in rows:
-                ev = map_payload(row.get("payload") or {}, branch=self.branch)
+                payload = row.get('payload') or {}
+                if not self._owns_payload(payload):
+                    raise ValueError('Lab event does not belong to this shop and channel')
+                ev = map_payload(payload, branch=self.branch)
                 if ev is not None:
                     events.append(ev)
             cursor = int(data.get("next_cursor", cursor))
@@ -156,10 +184,17 @@ class _LabAdapter(adapter.POSAdapter):
             if k.lower() == "x-idrak-signature":
                 provided = v or ""
                 break
-        return hmac.compare_digest(self.signature_for(body), provided)
+        if not hmac.compare_digest(self.signature_for(body), provided):
+            return False
+        try:
+            return self._owns_payload(json.loads(body))
+        except (ValueError, TypeError):
+            return False
 
     def normalize_webhook(self, body: bytes) -> "model.Event | None":
         payload = json.loads(body.decode("utf-8"))
+        if not self._owns_payload(payload):
+            raise ValueError('Lab event does not belong to this shop and channel')
         return map_payload(payload, branch=self.branch)
 
     @staticmethod

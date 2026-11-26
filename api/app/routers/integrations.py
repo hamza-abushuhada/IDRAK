@@ -7,14 +7,40 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
 
 from .. import db
 from ..auth import Ctx, require
 from ..services.pos import pipeline, registry
+from ..services.pos import pairing
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+@router.post('/lab/pairing-intents')
+async def lab_pairing_intent(ctx: Ctx = Depends(require("manage_integrations"))):
+    return JSONResponse(pairing.new_intent(ctx.org_id, ctx.user.id), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/lab/pair')
+async def pair_lab(request: Request, ctx: Ctx = Depends(require("manage_integrations"))):
+    import json
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 4096:
+            raise HTTPException(413, 'Pairing request too large')
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, dict) or set(value) != {'code', 'intent'}:
+            raise ValueError()
+        if not isinstance(value['code'], str) or not 20 <= len(value['code']) <= 128:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(400, 'Expected a pairing code and intent only') from None
+    return JSONResponse(await pairing.redeem(value['code'], value['intent'], ctx), headers={'Cache-Control': 'no-store'})
 
 # الحقول الآمنة للعرض من اتصال — لا credential_ref، لا أسرار. مؤهَّلة بالاسم
 # المستعار c حتى تعمل مع/بدون انضمام لجدول providers (الذي يشاركها status/config).

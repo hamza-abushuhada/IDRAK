@@ -24,7 +24,7 @@ app = FastAPI(title='IDRAK Connect Lab — isolated simulator', docs_url=None, r
 @app.middleware('http')
 async def authentication(request, call_next):
     path = request.url.path
-    public = path in ('/login', '/login.js', '/style.css', '/auth/login')
+    public = path in ('/login', '/login.js', '/style.css', '/auth/login', '/service/pairing/exchange')
     expected = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
     principal = await run_in_threadpool(
         lab.authenticate, request.headers.get('authorization', ''), request.url.path, request.method, expected)
@@ -97,6 +97,9 @@ async def dispatch(path: str, request: Request):
             body.extend(chunk)
             if len(body) > 100_000:
                 return JSONResponse({'error': 'Request too large'}, status_code=413)
+        if path == 'service/pairing/exchange':
+            import pairing
+            return JSONResponse(await run_in_threadpool(pairing.exchange, bytes(body), request.headers.get('authorization', '')))
         value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError('Expected a JSON object')
