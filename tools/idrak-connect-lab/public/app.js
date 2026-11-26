@@ -25,11 +25,81 @@ fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
   const label=document.createElement('span');label.className='pill';label.textContent=session.name;
   nav?.append(label);
   if(session.kind==='shop'){
+    setupPairing(session, nav);
     const button=document.createElement('button');button.className='btn secondary small';button.textContent='تسجيل الخروج';
     button.onclick=async()=>{await fetch('/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});location.replace('/login');};
     nav?.append(button);
   }
 }).catch(()=>{});
+
+function setupPairing(session, nav){
+  const open=document.createElement('button');open.type='button';open.className='btn small';open.textContent='ربط مع IDRAK';
+  nav?.append(open);
+  const dialog=document.createElement('dialog');dialog.className='pairing-dialog';dialog.setAttribute('aria-labelledby','pairing-title');
+  document.body.append(dialog);
+  let english=false, timer=null, abort=null;
+  const text=(ar,en)=>english?en:ar;
+  function clear(){
+    if(timer)clearInterval(timer);timer=null;
+    abort?.abort();abort=null;
+    dialog.querySelectorAll('input,textarea').forEach(el=>{el.value='';});
+  }
+  function draw(){
+    clear();dialog.dir=english?'ltr':'rtl';dialog.lang=english?'en':'ar';
+    dialog.innerHTML=`<div class="row"><h2 id="pairing-title">${text('ربط مع IDRAK','Connect to IDRAK')}</h2><div><button class="btn secondary small" type="button" id="pairing-language">${english?'العربية':'English'}</button> <button class="btn secondary small" type="button" id="pairing-close">${text('إغلاق','Close')}</button></div></div>
+      <p id="pairing-shop" class="pill"></p>
+      <p>${text('من صفحة IDRAK Connect، أنشئ طلب ربط للمؤسسة المطلوبة أولًا، ثم الصقه هنا. أبقِ صفحة إدراك مفتوحة.','First create a connection request in IDRAK Connect for your chosen business, then paste it here. Keep IDRAK open.')}</p>
+      <form id="pairing-form"><label for="pairing-intent">${text('طلب الربط المنسوخ من إدراك','Connection request copied from IDRAK')}</label><textarea id="pairing-intent" dir="ltr" rows="4" maxlength="2048" required autocomplete="off" spellcheck="false"></textarea>
+      <button class="btn" id="pairing-create" type="submit">${text('إنشاء رمز الاقتران','Create pairing code')}</button></form>
+      <p id="pairing-error" role="alert"></p><div id="pairing-result" hidden><p>${text('عُد إلى نفس صفحة إدراك وأدخل هذا الرمز مرة واحدة. الرمز خاص بهذا المحل والطلب.','Return to the same IDRAK page and enter this code once. It is bound to this shop and request.')}</p>
+      <label for="pairing-code">${text('رمز الاقتران المؤقت','Temporary pairing code')}</label><input id="pairing-code" dir="ltr" readonly autocomplete="off" spellcheck="false"><p id="pairing-expiry" role="timer"></p>
+      <button type="button" class="btn secondary" id="pairing-copy">${text('نسخ الرمز','Copy code')}</button><p id="pairing-notice" role="status"></p></div>`;
+    dialog.querySelector('#pairing-shop').textContent=session.name+' · '+session.shop_id;
+    dialog.querySelector('#pairing-close').onclick=()=>dialog.close();
+    dialog.querySelector('#pairing-language').onclick=drawLanguage;
+    dialog.querySelector('#pairing-form').onsubmit=async event=>{
+      event.preventDefault();
+      const input=dialog.querySelector('#pairing-intent'), button=dialog.querySelector('#pairing-create');
+      const intent=input.value.trim();input.value='';
+      dialog.querySelector('#pairing-result').hidden=true;dialog.querySelector('#pairing-code').value='';
+      dialog.querySelector('#pairing-error').textContent='';
+      if(timer)clearInterval(timer);timer=null;
+      button.disabled=true;abort=new AbortController();const pending=abort;
+      try{
+        const r=await fetch('/api/pairing-codes',{method:'POST',cache:'no-store',signal:pending.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({intent})});
+        if(!r.ok){
+          const errors={
+            400:text('طلب الربط غير صالح أو انتهت صلاحيته. أنشئ طلبًا جديدًا في إدراك.','The request is invalid or expired. Create a new request in IDRAK.'),
+            401:text('انتهت جلسة محلك. سجّل الدخول مجددًا.','Your shop session expired. Sign in again.'),
+            403:text('سجّل الدخول برمز محلك، وليس بحساب المشغّل العام.','Sign in with your shop credential, not the shared operator account.'),
+            409:text('هذا المحل مرتبط بمؤسسة أخرى. استخدم المؤسسة المرتبطة به أو محلًا مختلفًا.','This shop is linked to another business. Use its linked business or a different shop.'),
+            503:text('خدمة الربط غير جاهزة. تواصل مع المسؤول.','Pairing is not configured. Contact your administrator.')
+          };
+          throw new Error(errors[r.status]||text('تعذّر إنشاء الرمز. تحقق من الاتصال وحاول بطلب جديد.','Could not create a code. Check your connection and try a new request.'));
+        }
+        const result=await r.json();if(pending.signal.aborted)return;
+        const code=dialog.querySelector('#pairing-code'), copy=dialog.querySelector('#pairing-copy');
+        code.value=result.code;copy.disabled=false;dialog.querySelector('#pairing-result').hidden=false;
+        const tick=()=>{
+          const seconds=Math.max(0,Math.ceil(result.expires_at-Date.now()/1000));
+          dialog.querySelector('#pairing-expiry').textContent=seconds?text('ينتهي خلال ','Expires in ')+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0'):text('انتهت الصلاحية. أنشئ طلبًا ورمزًا جديدين.','Expired. Create a new request and code.');
+          if(!seconds){code.value='';copy.disabled=true;clearInterval(timer);timer=null;}
+        };
+        tick();timer=setInterval(tick,1000);code.focus();
+      }catch(error){if(error.name!=='AbortError')dialog.querySelector('#pairing-error').textContent=error instanceof TypeError?text('تعذّر الوصول إلى الخادم. تحقق من الاتصال وحاول مجددًا.','Cannot reach the server. Check your connection and try again.'):error.message;}
+      finally{if(!pending.signal.aborted)button.disabled=false;}
+    };
+    dialog.querySelector('#pairing-copy').onclick=async()=>{
+      const code=dialog.querySelector('#pairing-code');
+      if(!code.value)return;
+      try{await navigator.clipboard.writeText(code.value);dialog.querySelector('#pairing-notice').textContent=text('نُسخ الرمز. الصقه في نفس طلب الربط داخل إدراك.','Code copied. Paste it into the same IDRAK request.');}
+      catch{code.focus();code.select();dialog.querySelector('#pairing-notice').textContent=text('انسخ الرمز المحدد يدويًا.','Copy the selected code manually.');}
+    };
+  }
+  function drawLanguage(){english=!english;draw();}
+  dialog.addEventListener('close',()=>{clear();dialog.replaceChildren();});
+  open.onclick=()=>{draw();dialog.showModal();};
+}
 function renderProducts(){
   const node=$('products');if(!node)return;
   node.innerHTML=products.map(p=>`<article class="product"><div class="emoji">${p.emoji}</div><span class="name">${esc(p.name_ar)}</span><span class="stock">متوفر: ${p.stock} قطعة</span><div class="footer"><strong class="price">${fmt(p.price)}</strong><button class="btn small" data-add="${p.sku}" ${p.stock<=0?'disabled':''}>إضافة +</button></div></article>`).join('');

@@ -25,3 +25,6 @@ api/dev_local/
 dev-login/
 dev_session.json
 web/AGENTS.md
+
+# Alternate Next.js distDir outputs (NEXT_DIST_DIR=.next-*)
+.next-*/
