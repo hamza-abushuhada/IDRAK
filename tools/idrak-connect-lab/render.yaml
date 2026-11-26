@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: idrak-connect-lab
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    repo: https://github.com/hamza-abushuhada/IDRAK
+    branch: codex/fix-idrak-connect
+    rootDir: tools/idrak-connect-lab
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    numInstances: 1
+    healthCheckPath: /health
+    disk:
+      name: idrak-lab-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: IDRAK_LAB_DATA_DIR
+        value: /data
+      - key: IDRAK_LAB_ACCESS_USER
+        value: lab
+      - key: IDRAK_LAB_ACCESS_PASSWORD
+        generateValue: true
+      - key: IDRAK_LAB_WEBHOOK_SECRET
+        generateValue: true
