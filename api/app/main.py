@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from . import db
 from .config import settings
-from .routers import admin, assistant, data, insights, me, public, reports, workspace
+from .routers import admin, assistant, data, insights, integrations, me, public, reports, workspace
 
 
 @asynccontextmanager
@@ -26,8 +26,32 @@ async def lifespan(app: FastAPI):
                 await asyncio.gather(I.forecast(oid, None, None, 90, None), I.basket(oid, 60), I.cashflow(oid, 8, None), I.ramadan_movers(oid))
         except Exception as e:
             print("warm-up failed:", e)
+    async def auto_sync_loop():
+        """مزامنة تزايدية تلقائية احتياطية لاتصالات POS المفعّلة (config.auto_sync).
+        الفاصل = POS_AUTOSYNC_INTERVAL ثانية (افتراضي 15). لا يفقد الطلبات: عند
+        تعذّر الوصول للمصدر يفشل الجلب فلا يتقدّم المؤشّر، فتُعاد المحاولة الدورة
+        التالية (تعافٍ بعد الانقطاع). الأحداث الفاسدة تُسجَّل في pos_sync_errors."""
+        from .services.pos import pipeline as P
+        interval = max(5, int(os.getenv("POS_AUTOSYNC_INTERVAL", "15")))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                conns = await db.fetch(
+                    """select c.id, c.org_id, c.provider_code, c.account_ref, c.config, c.cursor
+                       from pos_connections c
+                       where c.status='connected' and coalesce((c.config->>'auto_sync')::boolean, false)""")
+            except Exception as e:
+                print("auto-sync query failed:", e); continue
+            for conn in conns:
+                try:
+                    await P.run_sync(conn["org_id"], None, dict(conn), trigger="scheduled", initial=False)
+                except Exception as e:  # مصدر غير متاح/خطأ: نسجّل ونكمل، المؤشّر لم يتقدّم
+                    print("auto-sync error for", conn["id"], ":", str(e)[:200])
+
     if not db.SERVERLESS:
         asyncio.create_task(warm())
+        if os.getenv("POS_AUTOSYNC", "1") != "0":
+            asyncio.create_task(auto_sync_loop())
     yield
     await db.close_pool()
 
@@ -102,7 +126,7 @@ async def ensure_db(request, call_next):
     await db.init_pool()
     return await call_next(request)
 
-for r in (public, me, data, workspace, insights, assistant, reports, admin):
+for r in (public, me, data, workspace, insights, assistant, reports, admin, integrations):
     app.include_router(r.router)
 
 

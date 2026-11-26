@@ -7,7 +7,7 @@ import clsx from "clsx";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   BarChart3, Bell, Building2, Calculator, ChevronDown, ClipboardCheck, Coins, Database, FileText, Gauge, Goal, LineChart, LogOut, Menu, PackageSearch,
-  Receipt, Settings, ShieldCheck, ShoppingBasket, Sparkles, Store, Truck, UserRound, Users, Wallet, X, Siren, Crown, Languages,
+  Receipt, Settings, ShieldCheck, ShoppingBasket, Sparkles, Store, Truck, UserRound, Users, Wallet, X, Siren, Crown, Languages, PlugZap,
 } from "lucide-react";
 import { useLocale, useTx } from "@/i18n";
 import { Logo } from "@/components/Logo";
@@ -22,7 +22,12 @@ import { useAssistant } from "@/components/assistant/store";
 type Item = { href: string; en: string; ar: string; icon: React.ComponentType<{ size?: number; className?: string }>; min?: "cashier" | "accountant" | "manager" | "owner" };
 const NAV: { en: string; ar: string; items: Item[] }[] = [
   { en: "Overview", ar: "نظرة عامة", items: [{ href: "/app", en: "Dashboard", ar: "لوحة التحكم", icon: Gauge }] },
-  { en: "Data", ar: "البيانات", items: [{ href: "/app/data", en: "Data hub & cleaning", ar: "البيانات والتنظيف", icon: Database, min: "manager" }] },
+  {
+    en: "Data", ar: "البيانات", items: [
+      { href: "/app/data", en: "Data hub & cleaning", ar: "البيانات والتنظيف", icon: Database, min: "manager" },
+      { href: "/app/integrations", en: "IDRAK Connect", ar: "ربط أنظمة نقاط البيع", icon: PlugZap, min: "manager" },
+    ],
+  },
   {
     en: "Business", ar: "الشغل", items: [
       { href: "/app/sales", en: "Sales", ar: "المبيعات", icon: Receipt },

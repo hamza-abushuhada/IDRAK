@@ -14,6 +14,7 @@ export type Dashboard = {
   payments: { m: string; n: number; revenue: number }[];
   branches: { id: string; name: string; name_ar: string | null; revenue: number; tx: number; prev_revenue: number; basket: number; growth: number | null }[];
   goals: { branch_id: string; name: string; name_ar: string | null; target: number; actual: number; pace: number }[];
+  channels?: { channel: string; tx: number; revenue: number; profit: number }[];
 };
 
 export type LeakKind = "dead_stock" | "below_cost" | "cashier_anomaly" | "shrinkage" | "expiring" | "supplier_price" | "stockout";

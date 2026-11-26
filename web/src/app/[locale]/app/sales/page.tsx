@@ -39,7 +39,9 @@ function Sales() {
 
   const org = useApiQuery<OrgBranches>("/org");
   const path = `/ws/sales${qs({ q, branch_id: branch, status, payment, start, end, offset, limit: LIMIT })}`;
-  const { data, error, refetch, isFetching } = useApiQuery<{ total: number; items: SaleRow[] }>(path, { placeholderData: (p) => p });
+  // تحديث حيّ: الفواتير الواصلة من المزامنة الخلفية تظهر بلا إعادة تحميل الصفحة.
+  const { data, error, refetch, isFetching } = useApiQuery<{ total: number; items: SaleRow[] }>(path, {
+    placeholderData: (p) => p, refetchInterval: 10000, refetchOnWindowFocus: true });
   const detail = useApiQuery<SaleDetail>(openId ? `/ws/sales/${openId}` : null);
 
   const setFilter = (patch: Record<string, string>) => { setOffset(0); set(patch); };
