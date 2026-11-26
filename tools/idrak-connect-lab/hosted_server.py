@@ -32,7 +32,7 @@ def deliver_to_simulator(url, payload):
     if url != f'http://127.0.0.1:{lab.RECEIVER_PORT}/ingest':
         raise ValueError('Only the standalone simulator is a valid destination')
     raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    status, _ = lab.ingest_event(raw, lab.sign(raw))
+    status, _ = lab.ingest_event(raw, lab.sign(raw, payload['source']['account_id']))
     return status
 
 
@@ -40,11 +40,10 @@ class HostedHandler(lab.SourceHandler):
     def parse_request(self):
         if not super().parse_request():
             return False
-        if self.command == 'GET' and urlparse(self.path).path == '/health':
-            return True
-        expected = base64.b64encode(f'{self.server.access_user}:{self.server.access_password}'.encode()).decode()
-        supplied = self.headers.get('Authorization', '')
-        if hmac.compare_digest(supplied.encode(), f'Basic {expected}'.encode()):
+        path = urlparse(self.path).path
+        expected = 'Basic ' + base64.b64encode(f'{self.server.access_user}:{self.server.access_password}'.encode()).decode()
+        self.principal = lab.authenticate(self.headers.get('Authorization', ''), path, self.command, expected)
+        if self.principal is not None:
             return True
         # Drain only a bounded body before closing. Unread POST bytes can reset
         # the connection and hide the 401 response from clients on Windows.

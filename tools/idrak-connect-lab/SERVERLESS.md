@@ -89,3 +89,22 @@ CDN extraction alone does not retain those templates for runtime reads.
 The live feed was pulled successfully by the separate synthetic IDRAK staging
 API at `https://idrak-connect-staging-api.vercel.app`. No production IDRAK
 connection, database write or deployment was performed.
+
+## Multiple shops (Phase 1)
+
+Every product, order, invoice number, event and receiver record belongs to a `shop_id`.
+Pre-existing data belongs to the legacy shop `idrak-test-shop-001` (so existing cursors,
+invoice numbers and the IDRAK `account_ref` are unchanged).
+
+- **Operator** (the site Basic credential) creates shops: `POST /api/shops {"name": "..."}`
+  returns `shop_id`, a one-time `token` (`<shop_id>.<secret>`; only a SHA-256 hash is stored)
+  and the shop's `webhook_secret`. `POST /api/shops/rotate-token {"shop_id"}` replaces a token.
+  Without `X-Lab-Shop` the operator acts on the legacy shop; with it, on that shop.
+- **Shop token**: `Authorization: Bearer <token>` is accepted only on `/api/*` and
+  `/simulator/api/*`, is pinned to its own shop (another `X-Lab-Shop` is 403) and never
+  opens pages or `/api/shops*`. The shop is never read from a request body.
+- Webhook signatures use a per-shop key derived from `IDRAK_LAB_WEBHOOK_SECRET`.
+- Existing SQLite files are upgraded automatically in one transaction at startup. For the
+  hosted PostgreSQL database run `python postgres_backend.py` (explicit, idempotent;
+  applies `serverless_migration_shops.sql`). Back up first.
+- Known limitation: `seq` (event cursor) is a global sequence, so gaps may appear in a shop's cursor.
