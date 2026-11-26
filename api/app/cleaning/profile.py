@@ -228,4 +228,50 @@ def refine_with_values(headers: list[str], rows: list[list], mapping: dict[str, 
         alt = _clear_kind(profiles[i], date_allowed())
         if alt and alt[0] not in used:
             take(m, *alt)
+
+    # Pass 3: a "unit price" that is really the line's total.
+    col = {m["field"]: i for i, m in enumerate(out[h] for h in headers) if m.get("field")}
+    if "total" not in col and {"unit_price", "quantity"} <= col.keys() and ({"product", "category"} & col.keys()):
+        item = col.get("product", col.get("category"))
+        share = line_total_share(rows, col["unit_price"], col["quantity"], item)
+        if share is not None and share >= CLEAR_KIND:
+            m = out[headers[col["unit_price"]]]
+            # Under review, so the AI step never moves it back by its name.
+            m.update(field="total", confidence=0.8, source="values", review=True,
+                     evidence={"type": "line_total", "kind": "money", "share": round(share, 2)})
     return out
+
+
+LINE_TOTAL_ROWS = 5000
+
+
+def line_total_share(rows: list[list], price_i: int, qty_i: int, item_i: int) -> float | None:
+    """Share of items whose "unit price" grows with the quantity, as a line total does.
+
+    For each item sold at two or more quantities: price / quantity the same at every
+    quantity while the price itself differs is a line total (5 x 300.08 = 1500.40);
+    the same price at every quantity is a unit price. None when fewer than 3 items
+    can tell (one quantity each, or prices that change for other reasons).
+    """
+    step = max(1, len(rows) // LINE_TOTAL_ROWS)
+    seen: dict[str, dict[float, list[float]]] = {}
+    for r in rows[::step]:
+        if max(price_i, qty_i, item_i) >= len(r):
+            continue
+        q, p = parse_number(r[qty_i])[0], parse_number(r[price_i])[0]
+        key = match_key(str(r[item_i] or ""))
+        if key and q and p and q > 0 and p > 0 and float(q).is_integer():
+            seen.setdefault(key, {}).setdefault(q, []).append(p)
+    total_like = unit_like = 0
+    for by_qty in seen.values():
+        if len(by_qty) < 2:
+            continue
+        med = {q: sorted(ps)[len(ps) // 2] for q, ps in by_qty.items()}
+        per_unit = [p / q for q, p in med.items()]
+        raw = list(med.values())
+        if max(per_unit) - min(per_unit) <= 0.01 * max(per_unit) and max(raw) - min(raw) > 0.2 * max(raw):
+            total_like += 1
+        elif max(raw) - min(raw) <= 0.01 * max(raw):
+            unit_like += 1
+    judged = total_like + unit_like
+    return total_like / judged if judged >= 3 else None

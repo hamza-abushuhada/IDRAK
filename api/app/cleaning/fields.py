@@ -6,28 +6,35 @@ FIELDS: dict[str, tuple[str, list[str]]] = {
     "invoice_number": ("id", ["invoice", "invoice no", "invoice number", "inv", "inv no", "receipt", "receipt no", "bill no", "رقم الفاتورة", "فاتورة", "الفاتورة", "رقم الايصال", "transaction id",
                                  # أنظمة المطاعم تسمّي الفاتورة "طلب".
                                  "رقم الطلب", "رقم الطلبية", "رقم الاوردر", "order no", "order number", "order id"]),
-    "date": ("date", ["date", "day", "sold at", "datetime", "sale date", "transaction date", "تاريخ", "التاريخ", "تاريخ البيع", "time", "الوقت"]),
+    "date": ("date", ["date", "day", "sold at", "datetime", "sale date", "transaction date", "invoice date", "order date", "bill date",
+                      "receipt date", "تاريخ", "التاريخ", "تاريخ البيع", "تاريخ الفاتورة", "تاريخ الطلب", "time", "الوقت"]),
     # عمود وقت منفصل عن التاريخ (Night / Afternoon / 14:30). إدراك يخزّن
     # البيع بتاريخ ووقت مع بعض، فنقرأ العمودين وندمجهم وقت الاستيراد.
     "sale_time": ("time", ["time of sale", "sale time", "time of day", "hour", "shift", "وقت البيع", "وقت العمليه", "الساعة",
-                         "وقت الطلب", "order time"]),    "branch": ("branch", ["branch", "store", "shop", "location", "outlet", "فرع", "الفرع", "المحل", "الموقع"]),
+                         "وقت الطلب", "order time"]),    "branch": ("branch", ["branch", "store", "shop", "location", "outlet", "store name", "shop name", "mall", "shopping mall",
+                          "فرع", "الفرع", "المحل", "الموقع", "المتجر", "المعرض", "مول", "المول"]),
     "cashier": ("person", ["cashier", "employee", "staff", "user", "sales person", "received by", "served by", "كاشير", "الكاشير", "الموظف", "موظف", "البائع"]),
     "product": ("product", ["product", "item", "item name", "product name", "description", "sku name", "اسم الصنف", "الصنف", "صنف", "المنتج", "اسم المنتج", "البند", "المادة"]),
     "barcode": ("barcode", ["barcode", "ean", "upc", "باركود", "الباركود"]),
-    "sku": ("id", ["sku", "item code", "code", "رمز الصنف", "كود الصنف", "كود"]),
+    "sku": ("id", ["sku", "item code", "code", "product code", "product id", "item id", "رمز الصنف", "كود الصنف", "رقم الصنف", "كود"]),
     "category": ("category", ["category", "department", "group", "item type", "product type", "item category", "الفئة", "التصنيف", "القسم"]),
     "quantity": ("quantity", ["qty", "quantity", "units", "count", "pcs", "الكمية", "كمية", "العدد", "عدد"]),
     "unit_price": ("money", ["price", "unit price", "selling price", "sale price", "item price", "unit amount", "سعر الوحدة", "السعر", "سعر", "سعر البيع", "سعر الحبة"]),
     "cost": ("money", ["cost", "unit cost", "purchase price", "التكلفة", "سعر الشراء", "الكلفة"]),
     "total": ("money", ["total", "amount", "line total", "net", "net amount", "value", "transaction amount", "grand total", "الإجمالي", "الاجمالي", "المجموع", "المبلغ", "القيمة"]),
     "discount": ("money", ["discount", "disc", "خصم", "الخصم"]),
+    # A line's profit. Never the total: "total_profit" was read as the line total and
+    # flagged every row as not matching quantity x price. When a file has no cost
+    # column, the importer works the cost out from it (price - profit / quantity).
+    "profit": ("money", ["profit", "total profit", "gross profit", "net profit", "line profit", "margin", "profit margin",
+                         "الربح", "ربح", "صافي الربح", "اجمالي الربح", "إجمالي الربح", "هامش الربح", "الهامش"]),
     "tax": ("money", ["tax", "vat", "sales tax", "ضريبة", "الضريبة", "ضريبة المبيعات"]),
     "payment_method": ("payment", ["payment", "payment method", "pay method", "tender", "method", "transaction type", "payment type", "طريقة الدفع", "الدفع", "وسيلة الدفع"]),
     "customer_name": ("person", ["customer", "customer name", "client", "name", "full name", "الزبون", "اسم الزبون", "العميل", "اسم العميل", "الاسم"]),
     "phone": ("phone", ["phone", "mobile", "tel", "telephone", "whatsapp", "customer phone", "phone number", "موبايل", "رقم الموبايل", "هاتف", "الهاتف", "رقم الهاتف", "جوال", "واتس",
                         "هاتف الزبون", "رقم هاتف الزبون", "جوال الزبون", "موبايل الزبون", "هاتف العميل", "رقم هاتف العميل"]),
     "email": ("email", ["email", "e-mail", "mail", "البريد", "البريد الالكتروني", "ايميل", "الايميل", "الإيميل"]),
-    "city": ("city", ["city", "town", "المدينة", "مدينة", "المحافظة"]),
+    "city": ("city", ["city", "town", "state", "province", "governorate", "المدينة", "مدينة", "المحافظة", "محافظة"]),
     "area": ("area", ["area", "district", "neighborhood", "neighbourhood", "region", "المنطقة", "منطقة", "الحي"]),
     "supplier": ("company", ["supplier", "vendor", "distributor", "المورد", "مورد", "الموزع", "اسم المورد", "supplier name", "vendor name"]),
     "carton_price": ("money", ["carton price", "case price", "سعر الكرتونة", "سعر الكرتونه"]),
@@ -44,7 +51,7 @@ LABELS = {
     "invoice_number": ("Invoice number", "رقم الفاتورة"), "date": ("Date", "التاريخ"), "sale_time": ("Time of sale", "وقت البيع"), "branch": ("Branch", "الفرع"),
     "cashier": ("Cashier", "الكاشير"), "product": ("Product", "الصنف"), "barcode": ("Barcode", "الباركود"), "sku": ("SKU", "رمز الصنف"),
     "category": ("Category", "الفئة"), "quantity": ("Quantity", "الكمية"), "unit_price": ("Unit price", "سعر الوحدة"),
-    "cost": ("Cost", "التكلفة"), "total": ("Total", "الإجمالي"), "discount": ("Discount", "الخصم"), "tax": ("Tax", "الضريبة"),
+    "cost": ("Cost", "التكلفة"), "total": ("Total", "الإجمالي"), "discount": ("Discount", "الخصم"), "profit": ("Profit", "الربح"), "tax": ("Tax", "الضريبة"),
     "payment_method": ("Payment method", "طريقة الدفع"), "customer_name": ("Customer name", "اسم الزبون"), "phone": ("Phone", "الهاتف"),
     "email": ("Email", "الإيميل"), "city": ("City", "المدينة"), "area": ("Area", "المنطقة"), "supplier": ("Supplier", "المورد"),
     "carton_price": ("Carton price", "سعر الكرتونة"), "pack_size": ("Pack size", "عدد الحبات"), "stock": ("Stock", "المخزون"), "minimum_stock": ("Minimum stock", "الحد الأدنى"),
@@ -85,6 +92,35 @@ def header_key(header) -> str:
     return match_key(str(header or "").replace("_", " "))
 
 
+# A word in a header that changes what the column is. token_set_ratio scores 100
+# whenever a synonym's words are all inside the header, so "total profit" read as
+# the total, "customer id" as the customer's name and "tax %" as the tax amount.
+# A loose match must carry these words itself ("profit" -> the profit field).
+_CHANGES_MEANING = {match_key(w) for w in (
+    "profit", "margin", "ربح", "الربح", "هامش", "الهامش",
+    "id", "code", "كود", "الكود", "رمز", "الرمز",
+    "percent", "percentage", "pct", "%", "نسبه", "النسبه", "نسبة", "النسبة")}
+_PERCENT = {match_key(w) for w in ("percent", "percentage", "pct", "%", "نسبه", "النسبه", "نسبة", "النسبة")}
+_ID_WORDS = {match_key(w) for w in ("id", "code", "كود", "الكود", "رمز", "الرمز")}
+# A bare "code" / "id" synonym (an item's SKU) must not take another thing's code.
+_OTHER_THINGS = {match_key(w) for w in (
+    "customer", "client", "member", "زبون", "الزبون", "عميل", "العميل", "supplier", "vendor", "مورد", "المورد",
+    "branch", "store", "فرع", "الفرع", "employee", "cashier", "staff", "موظف", "الموظف", "كاشير",
+    "postal", "zip", "بريدي", "البريدي", "invoice", "order", "فاتوره", "الفاتوره", "طلب", "الطلب")}
+
+
+def _fits(words: set[str], syn_key: str, field: str) -> bool:
+    syn = set(syn_key.split())
+    extra = (words & _CHANGES_MEANING) - syn
+    if field == "discount":
+        extra -= _PERCENT  # a discount is read as an amount or a percentage
+    if FIELDS[field][0] == "id":
+        extra -= _ID_WORDS  # "invoice id" is still the invoice number
+    if extra:
+        return False
+    return not (syn <= _CHANGES_MEANING and (words & _OTHER_THINGS) - syn)
+
+
 def guess_field(header: str) -> tuple[str | None, float]:
     k = header_key(header)
     if not k:
@@ -97,6 +133,8 @@ def guess_field(header: str) -> tuple[str | None, float]:
     # الآن أعلى درجة، وعند التعادل الأطول (الأكثر تحديداً). والتقريبية تبقى
     # ≤ 0.99 حتى تغلبها التامة عند التنافس على نفس الحقل في auto_map.
     hits = process.extract(k, _SYN_KEYS, scorer=fuzz.token_set_ratio, limit=None, score_cutoff=86)
+    words = set(k.split())
+    hits = [h for h in hits if _fits(words, h[0], _SYN[h[2]][1])]
     if not hits:
         return None, 0.0
     top = max(score for _, score, _ in hits)
@@ -218,6 +256,12 @@ def _detect(fields: set[str], tokens: set[str], guards: bool = True) -> tuple[st
 def _detect_by_fields(fields: set[str]) -> str:
     if {"product", "quantity"} <= fields and ({"date", "invoice_number"} & fields):
         return "sales"
+    # Sales by category (a chain's export of "Clothing", "Shoes" without item names):
+    # still a sales log, the category stands in for the item. It was read as a
+    # customer list because a customer column was the only other signal.
+    if ("product" not in fields and {"category", "quantity"} <= fields and {"date", "invoice_number"} <= fields
+            and ({"unit_price", "total"} & fields)):
+        return "sales"
     # Stock first: a menu or inventory list names a default supplier and a unit of
     # measure too, and read as supplier prices it lost its selling prices and stock.
     if "product" in fields and ({"stock", "minimum_stock"} & fields):
@@ -252,7 +296,7 @@ ENTITIES = tuple(REQUIRED)
 # What importing each type really needs; each item is met by any of its fields.
 # The importer derives a sale's unit price from total ÷ quantity, and a supplier
 # price list stores the cost column, else the price.
-STANDS_IN = {("sales", "unit_price"): ["total"], ("supplier_prices", "unit_price"): ["cost"],
+STANDS_IN = {("sales", "unit_price"): ["total"], ("sales", "product"): ["category"], ("supplier_prices", "unit_price"): ["cost"],
               ("purchases", "unit_price"): ["carton_price", "cost", "total"]}
 NEEDS = {e: [[f, *STANDS_IN.get((e, f), [])] for f in fs] for e, fs in REQUIRED.items()}
 
