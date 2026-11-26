@@ -18,3 +18,9 @@ api/seed/out/
 *.log
 .DS_Store
 *.pem
+
+# Dev-only local review harness — never commit (secrets / login bypass).
+api/dev_local/
+dev-login/
+dev_session.json
+web/AGENTS.md

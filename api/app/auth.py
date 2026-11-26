@@ -18,6 +18,7 @@ PERMISSIONS = {
     "manage_inventory": "manager",
     "send_supplier_email": "manager",
     "manage_alerts": "manager",
+    "manage_integrations": "manager",
     "manage_team": "owner",
     "manage_billing": "owner",
     "manage_org": "owner",

@@ -48,7 +48,9 @@ function DashboardScreen() {
   const pickEnd = (v: string) => setEnd(clamp(v, startRaw || firstDay, lastDay));
   const q = useApiQuery<Dashboard>(custom
     ? `/insights/dashboard?start=${startRaw}&end=${endRaw}${branch ? `&branch_id=${branch}` : ""}`
-    : `/insights/dashboard?days=${days}${branch ? `&branch_id=${branch}` : ""}`);
+    : `/insights/dashboard?days=${days}${branch ? `&branch_id=${branch}` : ""}`,
+    // تحديث حيّ: اللوحة وبطاقة القنوات تتحدّث مع المزامنة التلقائية بلا إعادة تحميل.
+    { refetchInterval: 15000, refetchOnWindowFocus: true });
   const d = q.data;
   const k = d?.kpis;
   const vsLabel = custom
@@ -156,6 +158,14 @@ function DashboardScreen() {
               <Payments d={d} />
             </Section>
           </div>
+
+          {d?.channels?.some((c) => c.channel !== "direct") && (
+            <Section id="channel-mix" className="mt-5" title={tx("Sales by channel", "المبيعات حسب القناة")}
+              subtitle={tx("In-store POS, online store, and other connected sources — one unified view, no double counting.",
+                "كاشير المحل والمتجر الأونلاين والمصادر المربوطة — بعرض موحّد وبلا احتساب مزدوج.")}>
+              <Channels d={d} />
+            </Section>
+          )}
 
           <Section id="category-mix" className="mt-5" title={tx("Category mix", "توزيع الأقسام")}
             subtitle={tx("Where revenue comes from, and how much each category keeps as profit", "من وين بتيجي المبيعات، وقدّيش كل قسم بيربّح")}>
@@ -290,6 +300,38 @@ function Payments({ d }: { d?: Dashboard }) {
             </div>
             <ShareBar className="mt-1.5" value={share} tone={tones[i % tones.length]} />
             <p className="mt-1 text-[12px] text-ink-3"><Money v={p.revenue} /> · <span className="num">{num(p.n)}</span> {tx("receipts", "فاتورة")}</p>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+const CHANNEL_LABELS: Record<string, [string, string]> = {
+  in_store: ["In-store POS", "كاشير المحل"], online: ["Online store", "متجر أونلاين"],
+  other: ["Other source", "مصدر آخر"], direct: ["Direct / manual", "مباشر / يدوي"],
+};
+
+function Channels({ d }: { d?: Dashboard }) {
+  const tx = useTx();
+  if (!d) return <div className="space-y-4">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-8 w-full" />)}</div>;
+  const rows = d.channels || [];
+  const total = rows.reduce((a, c) => a + c.revenue, 0) || 1;
+  const tones = ["olive", "saffron", "terra", "sky"] as const;
+  if (!rows.length) return <Empty title={tx("No channel data yet", "ما في بيانات قنوات لسّا")} />;
+  return (
+    <ul className="space-y-4">
+      {rows.map((c, i) => {
+        const share = (100 * c.revenue) / total;
+        const lbl = CHANNEL_LABELS[c.channel] || [c.channel, c.channel];
+        return (
+          <li key={c.channel}>
+            <div className="flex items-baseline justify-between gap-2 text-[13.5px]">
+              <span className="text-ink">{tx(lbl[0], lbl[1])}</span>
+              <span className="num font-medium text-ink">{pct(share, 0)}</span>
+            </div>
+            <ShareBar className="mt-1.5" value={share} tone={tones[i % tones.length]} />
+            <p className="mt-1 text-[12px] text-ink-3"><Money v={c.revenue} /> · <span className="num">{num(c.tx)}</span> {tx("invoices", "فاتورة")}</p>
           </li>
         );
       })}

@@ -99,6 +99,12 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
         from sales s where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf} group by 1,2""", org_id, start, end, *bargs)
     q_pay = db.fetch(f"""select payment_method m, count(*) n, sum(total) revenue from sales s where s.org_id=$1 and s.status='completed'
         and amman_date(s.sold_at) between $2 and $3 {bf} group by 1 order by 2 desc""", org_id, start, end, *bargs)
+    # توحيد القنوات: كل فاتورة مكتملة في قناة واحدة، فمجموع القنوات = الإجمالي (بلا ازدواج).
+    # القيم: in_store (كاشير)، online (متجر)، other (مصدر آخر)، direct (إدخال/استيراد مباشر).
+    q_channels = db.fetch(f"""select coalesce(s.channel,'direct') channel, count(*) tx, sum(s.total) revenue,
+            sum((select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si where si.sale_id=s.id)) profit
+        from sales s where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf}
+        group by 1 order by revenue desc""", org_id, start, end, *bargs)
     q_branches = db.fetch("""
         select b.id, b.name, b.name_ar,
           coalesce(sum(s.total) filter (where amman_date(s.sold_at) between $2 and $3),0) revenue,
@@ -113,8 +119,8 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
           (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
              and amman_date(s.sold_at) between $2 and $3) actual
         from goals g join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 and g.period_month=$2""", org_id, month, end)
-    cur, prev, series, top, cats, heat, pay, branches, goals = await asyncio.gather(
-        kpis(start, end), kpis(pstart, pend), q_series, q_top, q_cats, q_heat, q_pay, q_branches, q_goals)
+    cur, prev, series, top, cats, heat, pay, branches, goals, channels = await asyncio.gather(
+        kpis(start, end), kpis(pstart, pend), q_series, q_top, q_cats, q_heat, q_pay, q_branches, q_goals, q_channels)
     for b in branches:
         b["basket"] = b["revenue"] / b["tx"] if b["tx"] else 0
         b["growth"] = round(100 * (b["revenue"] - b["prev_revenue"]) / b["prev_revenue"], 1) if b["prev_revenue"] else None
@@ -130,7 +136,7 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
         "kpis": {k: _r(v) for k, v in cur.items()},
         "deltas": {k: delta(k) for k in ("revenue", "profit", "tx", "basket", "margin", "customers", "discounts")},
         "series": series, "top_products": top, "categories": cats, "heatmap": heat, "payments": pay,
-        "branches": branches, "goals": goals,
+        "branches": branches, "goals": goals, "channels": channels,
     }
 
 
