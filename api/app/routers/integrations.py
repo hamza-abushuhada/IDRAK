@@ -8,6 +8,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+import os
 
 from .. import db
 from ..auth import Ctx, require
@@ -62,12 +63,15 @@ def _config_for(provider_code: str) -> dict:
     if provider_code == "demo":
         # التجريبي يدويّ (Sync now) — مزامنته التلقائية تولّد مبيعات اصطناعية بلا توقّف.
         return {"channel": "in_store", "auto_sync": False}
+    lab_url = "http://127.0.0.1:8765"
+    if os.environ.get("IDRAK_ENVIRONMENT") == "staging":
+        lab_url = os.environ.get("IDRAK_LAB_BASE_URL") or lab_url
     if provider_code == "lab_pos":
         return {"channel": "in_store", "sales_adjust_inventory": False, "auto_sync": True,
-                "base_url": "http://127.0.0.1:8765"}
+                "base_url": lab_url}
     if provider_code == "lab_web":
         return {"channel": "online", "sales_adjust_inventory": False, "auto_sync": True,
-                "base_url": "http://127.0.0.1:8765"}
+                "base_url": lab_url}
     return {}
 
 

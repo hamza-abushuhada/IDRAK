@@ -2,6 +2,9 @@ from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 import os
 import time
+import logging
+
+from asyncpg import UndefinedTableError, UndefinedColumnError, InvalidColumnReferenceError
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +62,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Idrak API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+async def schema_not_ready(request: Request, exc: Exception):
+    # Handled inside CORS: an absent migration must not look like a network
+    # outage in the browser. Log metadata only, never SQL, parameters or secrets.
+    logging.getLogger(__name__).error(
+        "Database schema mismatch: method=%s path=%s sqlstate=%s",
+        request.method, request.url.path, getattr(exc, "sqlstate", "unknown"))
+    return JSONResponse(status_code=503, content={
+        "code": "schema_not_ready",
+        "detail": {
+            "en": "This feature needs a database update. Please contact your administrator.",
+            "ar": "هذه الميزة تحتاج تحديث قاعدة البيانات. يرجى التواصل مع مسؤول النظام.",
+        },
+    }, headers={"Cache-Control": "no-store"})
+
+
+for schema_error in (UndefinedTableError, UndefinedColumnError, InvalidColumnReferenceError):
+    app.add_exception_handler(schema_error, schema_not_ready)
 
 _public_rate_limits = {
     "/public/contact": (10, 60),

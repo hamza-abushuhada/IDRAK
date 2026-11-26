@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!demo_server.py
+!hosted_server.py
+!public/
+!public/**

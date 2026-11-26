@@ -10,6 +10,10 @@ system and needs none of your personal data.
 - Listens on `127.0.0.1` only (not the network/internet).
 - No real payments, no real customer data, not production-ready as-is.
 
+For a separate password-protected hosted demo, see [DEPLOYMENT.md](DEPLOYMENT.md).
+That runner uses one port and persistent isolated SQLite storage. It has not been
+deployed and does not connect to production IDRAK.
+
 ---
 
 ## English

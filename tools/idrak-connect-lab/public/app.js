@@ -11,7 +11,8 @@ const labelStatus = (s) => ({completed:'مكتملة',pending:'بانتظار ا
 const labelChannel = (c) => c === 'pos' ? 'الكاشير POS' : 'المتجر الإلكتروني';
 function toast(message,error=false){const old=document.querySelector('.toast');if(old)old.remove();const el=document.createElement('div');el.className='toast'+(error?' error':'');el.textContent=message;document.body.append(el);setTimeout(()=>el.remove(),3800)}
 async function api(path,options={}){
-  const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});
+  const prefix=page==='inbox' && location.pathname.startsWith('/simulator') ? '/simulator' : '';
+  const r=await fetch(prefix+path,{headers:{'Content-Type':'application/json'},...options});
   const data=await r.json();
   if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);
   return data;

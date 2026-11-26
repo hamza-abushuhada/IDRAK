@@ -1,0 +1,12 @@
+.env
+.env.*
+*.env.example
+data/
+*.sqlite3*
+tests/
+__pycache__/
+*.pyc
+Dockerfile
+.dockerignore
+render.yaml
+START_WINDOWS.bat

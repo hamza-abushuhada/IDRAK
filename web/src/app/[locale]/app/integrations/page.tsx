@@ -6,7 +6,7 @@ import {
   Boxes, Cloud, FileSpreadsheet, HardDrive, Link2, ChevronDown, ChevronUp,
   FlaskConical, XCircle, Zap, ShoppingBag, Globe,
 } from "lucide-react";
-import { useLocale, useTx } from "@/i18n";
+import { useTx } from "@/i18n";
 import { useApiQuery, useApiMutation } from "@/lib/useApi";
 import { timeAgo } from "@/lib/format";
 import { toast } from "@/components/ui/toast";
@@ -121,7 +121,9 @@ export default function IntegrationsPage() {
               "اختر نظام لتربطه. رح يتوفّر المزيد مع بناء التكاملات.")}
             className="mb-6"
           >
-            {!providers ? (
+            {providersQ.error ? (
+              <ErrorBox error={providersQ.error} retry={() => providersQ.refetch()} />
+            ) : !providers ? (
               <div className="grid gap-3 sm:grid-cols-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-28 w-full" />)}</div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -344,7 +346,9 @@ function ConnectionRow({ conn }: { conn: Connection }) {
               </ul>
             </div>
           )}
-          {!jobs ? (
+          {detailQ.error ? (
+            <ErrorBox error={detailQ.error} retry={() => detailQ.refetch()} />
+          ) : !jobs ? (
             <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-7 w-full" />)}</div>
           ) : (
             <div className="overflow-hidden rounded-lg border border-line bg-paper">

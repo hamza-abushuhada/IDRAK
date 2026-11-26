@@ -1,0 +1,11 @@
+[project]
+name = "idrak-connect-lab"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["fastapi==0.115.6", "psycopg[binary]==3.2.10"]
+
+[tool.vercel]
+entrypoint = "serverless_app:app"
+
+[tool.vercel.scripts]
+build = "python build.py"

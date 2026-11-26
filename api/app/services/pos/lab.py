@@ -101,11 +101,12 @@ class _LabAdapter(adapter.POSAdapter):
         initial_import=True, incremental=True, refunds=True, inventory=True, webhook=True)
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, secret: str = DEFAULT_SECRET,
-                 branch: str = DEFAULT_BRANCH, transport=None):
+                 branch: str = DEFAULT_BRANCH, transport=None, authorization: str | None = None):
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.secret = secret or DEFAULT_SECRET
         self.branch = branch or DEFAULT_BRANCH
         self._transport = transport  # قابل للحقن في الاختبار: fn(url)->dict
+        self.authorization = authorization
 
     # -- الجلب عبر HTTP (مصدر محلّي؛ مهلة قصيرة) -------------------------
     def _get(self, after: int, limit: int = 100) -> dict:
@@ -113,7 +114,10 @@ class _LabAdapter(adapter.POSAdapter):
         url = f"{self.base_url}/api/{path}/events?after={int(after)}&limit={int(limit)}"
         if self._transport is not None:
             return self._transport(url)
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        headers = {"Accept": "application/json"}
+        if self.authorization:
+            headers["Authorization"] = self.authorization
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (127.0.0.1 only)
             return json.loads(r.read() or "{}")
 
