@@ -108,3 +108,28 @@ invoice numbers and the IDRAK `account_ref` are unchanged).
   hosted PostgreSQL database run `python postgres_backend.py` (explicit, idempotent;
   applies `serverless_migration_shops.sql`). Back up first.
 - Known limitation: `seq` (event cursor) is a global sequence, so gaps may appear in a shop's cursor.
+
+## Shop browser access (Phase 2, step 1)
+
+Open `/login` and enter the shop credential issued by the operator in Phase 1.
+No operator password is needed. The credential is submitted in a POST body only;
+it is never added to a URL, localStorage, sessionStorage, or a browser-readable cookie.
+The POS, Shop and Admin pages show the current shop name and a logout button.
+The server pins all page API requests to the authenticated shop.
+
+Login issues a signed, eight-hour `HttpOnly; SameSite=Strict; Secure` session cookie.
+It contains no API secret or database token hash. The server rechecks token rotation
+and disabled status on each request. Cross-origin cookie writes are rejected.
+Logout clears the browser cookie; an already copied session cookie remains valid
+until expiry or operator token rotation. Use HTTPS for hosted access.
+
+Existing operator Basic authentication still accesses the legacy shop by default;
+`/operator` provides the explicit operator entry. A shop session takes precedence
+over cached Basic credentials, preventing accidental operator access from shop pages.
+For the standalone hosted runner on HTTP localhost only, set
+`IDRAK_LAB_COOKIE_SECURE=no` during local testing (default is `yes`). The original
+two-port local runner retains its existing behavior.
+
+No schema migration is required by this step, and no IDRAK organization linking or
+pairing flow is included. The new FastAPI browser-session tests use disposable
+SQLite storage and never connect to PostgreSQL or a hosted database.

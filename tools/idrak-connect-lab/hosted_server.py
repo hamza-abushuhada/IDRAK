@@ -13,6 +13,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import demo_server as lab
+import browser_auth
 
 
 def validate_settings():
@@ -43,8 +44,28 @@ class HostedHandler(lab.SourceHandler):
         path = urlparse(self.path).path
         expected = 'Basic ' + base64.b64encode(f'{self.server.access_user}:{self.server.access_password}'.encode()).decode()
         self.principal = lab.authenticate(self.headers.get('Authorization', ''), path, self.command, expected)
+        cookie_principal = browser_auth.authenticate(self.headers.get('Cookie'))
+        if browser_auth.COOKIE + '=' in self.headers.get('Cookie', ''):
+            self.principal = cookie_principal
+        if path in ('/login', '/login.js', '/style.css', '/auth/login') and self.principal is None:
+            self.principal = lab.Principal('anonymous')
+        if self.command == 'POST':
+            # Trust TLS forwarding only when explicitly configured by the operator.
+            scheme = 'https' if os.environ.get('IDRAK_LAB_COOKIE_SECURE', 'yes') == 'yes' else 'http'
+            headers = {k.lower(): v for k, v in self.headers.items()}
+            if not browser_auth.same_origin(headers, scheme + '://' + self.headers.get('Host', ''), cookie_auth=cookie_principal is not None or path == '/auth/login'):
+                self.close_connection = True
+                self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
+                return False
         if self.principal is not None:
             return True
+        if self.command == 'GET' and not self.headers.get('Authorization') and path in ('/', '/pos', '/shop', '/admin', '/simulator', '/simulator/'):
+            self.send_response(303)
+            self.send_header('Location', '/login')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return False
         # Drain only a bounded body before closing. Unread POST bytes can reset
         # the connection and hide the 401 response from clients on Windows.
         try:
@@ -56,7 +77,9 @@ class HostedHandler(lab.SourceHandler):
             pass
         self.close_connection = True
         self.send_response(401)
-        self.send_header('WWW-Authenticate', 'Basic realm="IDRAK Connect Lab", charset="UTF-8"')
+        if browser_auth.COOKIE + '=' not in self.headers.get('Cookie', ''):
+            self.send_header('WWW-Authenticate', 'Basic realm="IDRAK Connect Lab", charset="UTF-8"')
+        self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', '0')
         self.send_header('Connection', 'close')
         self.end_headers()
@@ -95,10 +118,37 @@ class HostedHandler(lab.SourceHandler):
         return False
 
     def do_GET(self):
+        path = urlparse(self.path).path
+        if path in ('/login', '/login.js', '/operator'):
+            return self.serve_file({'/login': 'login.html', '/login.js': 'login.js', '/operator': 'home.html'}[path])
+        if path == '/auth/session':
+            def session():
+                shop = lab.effective_shop(self.principal, self.x_shop())
+                with lab.connect(lab.SOURCE_DB) as db:
+                    name = db.execute('SELECT name FROM shops WHERE shop_id=?', (shop,)).fetchone()['name']
+                return {'name': name, 'shop_id': shop, 'kind': self.principal.kind}
+            return self.guarded(session)
         if not self._receiver('do_GET'):
             super().do_GET()
 
     def do_POST(self):
+        path = urlparse(self.path).path
+        if path in ('/auth/login', '/auth/logout'):
+            try:
+                body = self.read_json()
+                value = browser_auth.login(body.get('token')) if path == '/auth/login' else ''
+                self.send_response(200)
+                self.send_header('Set-Cookie', browser_auth.cookie_header(value, os.environ.get('IDRAK_LAB_COOKIE_SECURE', 'yes') == 'yes'))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', '11')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except lab.LabAuthError as exc:
+                self.send_json(exc.status, {'error': 'Invalid shop credential'})
+            except (ValueError, TypeError, AttributeError):
+                self.send_json(400, {'error': 'Invalid request'})
+            return
         if not self._receiver('do_POST'):
             super().do_POST()
 

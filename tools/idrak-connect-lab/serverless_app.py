@@ -13,6 +13,7 @@ import psycopg
 import demo_server as lab
 from hosted_server import deliver_to_simulator, validate_settings
 import postgres_backend
+import browser_auth
 
 postgres_backend.install()
 USER, PASSWORD = validate_settings()
@@ -22,15 +23,27 @@ app = FastAPI(title='IDRAK Connect Lab — isolated simulator', docs_url=None, r
 
 @app.middleware('http')
 async def authentication(request, call_next):
+    path = request.url.path
+    public = path in ('/login', '/login.js', '/style.css', '/auth/login')
     expected = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
     principal = await run_in_threadpool(
         lab.authenticate, request.headers.get('authorization', ''), request.url.path, request.method, expected)
+    cookie_principal = await run_in_threadpool(browser_auth.authenticate, request.cookies and request.headers.get('cookie'))
+    # A browser shop session takes precedence over cached operator Basic auth.
+    if browser_auth.COOKIE in request.cookies:
+        principal = cookie_principal
+    if principal is None and public:
+        principal = lab.Principal('anonymous')
+    if principal is None and not request.headers.get('authorization') and request.method == 'GET' and path in ('/', '/pos', '/shop', '/admin', '/simulator', '/simulator/'):
+        return Response(status_code=303, headers={'Location': '/login', 'Cache-Control': 'no-store'})
     if principal is None:
-        return Response(status_code=401, headers={'WWW-Authenticate': 'Basic realm="IDRAK Connect Lab", charset="UTF-8"'})
+        headers = {'Cache-Control': 'no-store'}
+        if browser_auth.COOKIE not in request.cookies:
+            headers['WWW-Authenticate'] = 'Basic realm="IDRAK Connect Lab", charset="UTF-8"'
+        return Response(status_code=401, headers=headers)
     request.state.principal = principal
     if request.method == 'POST':
-        origin = request.headers.get('origin')
-        if origin and origin.rstrip('/') != str(request.base_url).rstrip('/'):
+        if not browser_auth.same_origin(request.headers, str(request.base_url), cookie_auth=cookie_principal is not None or path == '/auth/login'):
             return JSONResponse({'error': 'Cross-origin writes are not allowed'}, status_code=403)
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
@@ -53,10 +66,15 @@ def static_file(filename):
 
 
 def dispatch_get(principal, x_shop, path, query):
-    files = {'/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
+    files = {'/login': 'login.html', '/login.js': 'login.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
              '/style.css': 'style.css', '/app.js': 'app.js', '/simulator': 'inbox.html', '/simulator/': 'inbox.html'}
     if path in files:
         return static_file(files[path])
+    if path == '/auth/session':
+        shop = lab.effective_shop(principal, x_shop)
+        with lab.connect(lab.SOURCE_DB) as db:
+            name = db.execute('SELECT name FROM shops WHERE shop_id=?', (shop,)).fetchone()['name']
+        return JSONResponse({'name': name, 'shop_id': shop, 'kind': principal.kind})
     if path == '/health':
         with lab.connect(lab.SOURCE_DB) as db:
             db.execute('SELECT sku FROM products LIMIT 0')
@@ -82,6 +100,15 @@ async def dispatch(path: str, request: Request):
         value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError('Expected a JSON object')
+        if path == 'auth/login':
+            session = await run_in_threadpool(browser_auth.login, value.get('token'))
+            response = JSONResponse({'ok': True})
+            response.headers['Set-Cookie'] = browser_auth.cookie_header(session, request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
+            return response
+        if path == 'auth/logout':
+            response = JSONResponse({'ok': True})
+            response.headers['Set-Cookie'] = browser_auth.cookie_header('', request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
+            return response
         return JSONResponse(await run_in_threadpool(
             lab.handle_source_post, request.state.principal, request.headers.get('x-lab-shop'), '/' + path, value))
     except lab.LabAuthError as exc:

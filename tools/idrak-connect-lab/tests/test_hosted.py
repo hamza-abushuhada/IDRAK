@@ -52,7 +52,9 @@ class HostedLabTests(unittest.TestCase):
     def test_health_public_but_pages_and_mutations_protected(self):
         with self.request('/health', auth=False) as r:
             self.assertTrue(json.load(r)['ok'])
-        for path, body in [('/pos', None), ('/api/products', None),
+        with self.request('/pos', auth=False) as r:
+            self.assertTrue(r.url.endswith('/login'))
+        for path, body in [('/api/products', None),
                            ('/simulator/api/summary', None), ('/api/pos/sales', {})]:
             with self.subTest(path=path):
                 with self.assertRaises(HTTPError) as caught:
