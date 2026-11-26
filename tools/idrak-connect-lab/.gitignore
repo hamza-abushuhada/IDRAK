@@ -1,0 +1,12 @@
+# IDRAK Connect Lab — never commit runtime data or secrets.
+__pycache__/
+*.pyc
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+.env.*
+!env.example
+dev_session.json
+*.session
