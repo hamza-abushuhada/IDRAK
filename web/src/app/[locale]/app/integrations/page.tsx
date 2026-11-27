@@ -3,8 +3,8 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, CheckCircle2, CircleOff, Clock, FlaskConical, Globe, Info, Pencil, PlugZap, Plus,
-  RefreshCw, Settings2, ShoppingBag, Sparkles, Store, Unplug, Upload, XCircle,
+  AlertTriangle, CheckCircle2, CircleOff, Clock, FlaskConical, Globe, Info, KeyRound, Pencil, PlugZap, Plus,
+  RefreshCw, Settings2, ShoppingBag, Sparkles, Store, Trash2, Unplug, Upload, XCircle,
 } from "lucide-react";
 import { useTx } from "@/i18n";
 import { api, ApiError } from "@/lib/api";
@@ -15,7 +15,8 @@ import { PageHeader, Section, ErrorBox } from "@/components/app/kit";
 import { Badge, Button, Card, Empty, Input, Skeleton } from "@/components/ui";
 import { Drawer } from "@/components/workspace/common";
 import { useSession } from "@/components/app/session";
-import ConnectWizard from "@/components/app/connect/ConnectWizard";
+import ConnectWizard, { type Choice } from "@/components/app/connect/ConnectWizard";
+import { VendorLogo } from "@/components/app/connect/vendors";
 import { takeFlash, type Flash } from "@/components/app/connect/pending";
 import {
   friendlyError, groupSystems, systemAutoSync, type Channel, type ConnectedSystem, type Connection, type Counts, type Job,
@@ -50,9 +51,17 @@ export default function IntegrationsPage() {
   const { can } = useSession();
   const canManage = can("manager");
   const providersQ = useApiQuery<Provider[]>("/integrations/providers");
-  const statusQ = useApiQuery<{ auto_sync_active: boolean; lab_linking?: boolean; loyverse_available?: boolean }>("/integrations/status");
+  const statusQ = useApiQuery<{ auto_sync_active: boolean; lab_linking?: boolean; loyverse_available?: boolean; store_key_available?: boolean }>("/integrations/status");
   const connsQ = useApiQuery<Connection[]>("/integrations/connections", { refetchInterval: 15000, refetchOnWindowFocus: true });
-  const [wizard, setWizard] = useState<{ open: boolean; choice: "lab" | null }>({ open: false, choice: null });
+  const [wizard, setWizard] = useState<{ open: boolean; choice: Choice | null }>({ open: false, choice: null });
+  const storeKeys = !!statusQ.data?.store_key_available;
+  // Safety net for missed store notifications: pull stores linked by API key that haven't synced lately.
+  useEffect(() => {
+    if (!storeKeys) return;
+    void api<{ imported: number }>("/integrations/catch-up", { method: "POST" })
+      .then((r) => { if (r.imported) void qc.invalidateQueries({ predicate: (q) => /^\/integrations\/connections/.test(String(q.queryKey[1] || "")) }); })
+      .catch(() => {});
+  }, [storeKeys, qc]);
   const [manageKey, setManageKey] = useState<string | null>(null);
   // Success message after returning from the POS approval (set by the callback page).
   const [flash, setFlash] = useState<Flash | null>(null);
@@ -141,15 +150,23 @@ export default function IntegrationsPage() {
 
       {canManage && (
         <ConnectWizard key={`${wizard.choice}-${wizard.open}`} open={wizard.open} initialChoice={wizard.choice} labLinking={labLinking} loyverseAvailable={!!statusQ.data?.loyverse_available}
+          storeKeyAvailable={storeKeys}
           onOpenChange={(o) => setWizard((w) => ({ ...w, open: o }))} providers={providersQ.data} onConnected={refresh} />
       )}
       {managed && (
-        <ManageSystem system={managed} canManage={canManage} autoSync={systemAutoSync(managed, !!autoSync)} labLinking={labLinking} onClose={() => setManageKey(null)} onChanged={refresh}
-          onReconnect={() => { setManageKey(null); setWizard({ open: true, choice: "lab" }); }} />
+        <ManageSystem system={managed} canManage={canManage} autoSync={systemAutoSync(managed, !!autoSync)} labLinking={labLinking} storeKeys={storeKeys}
+          onClose={() => setManageKey(null)} onChanged={refresh}
+          onReconnect={(choice) => { setManageKey(null); setWizard({ open: true, choice }); }} />
       )}
     </div>
   );
 }
+
+/** Official logo for systems of a real vendor (Loyverse today); null keeps the generic icon. */
+function vendorCode(system: ConnectedSystem): string | null {
+  return system.channels.some((c) => c.conn.provider_code === "loyverse") ? "loyverse" : null;
+}
+const byApiKey = (system: ConnectedSystem) => system.channels.some((c) => !!c.conn.config?.store_api_key);
 
 async function syncSystem(system: ConnectedSystem) {
   const totals: Counts = { imported: 0, updated: 0, failed: 0 };
@@ -186,12 +203,14 @@ function SystemCard({ system, canManage, autoSync, onManage, onChanged }: {
     <div className="px-4 py-4 sm:px-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-start gap-3">
-          <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-terra-soft text-terra-2"><KindIcon size={20} /></span>
+          {vendorCode(system) ? <VendorLogo code={vendorCode(system)!} name={labels.vendor(system)} size={44} />
+            : <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-terra-soft text-terra-2"><KindIcon size={20} /></span>}
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <p className="truncate font-medium text-ink">{labels.name(system)}</p>
               <Badge tone={st.tone}><SI size={11} />{tx(st.en, st.ar)}</Badge>
               {system.kind === "lab" && <Badge tone="saffron">{tx("Test system", "نظام اختبار")}</Badge>}
+              {byApiKey(system) && <Badge tone="neutral"><KeyRound size={11} />{tx("API key", "مفتاح API")}</Badge>}
               {system.kind === "demo" && <Badge tone="neutral">{tx("Sample data", "بيانات وهمية")}</Badge>}
             </div>
             <p className="mt-0.5 text-[12.5px] text-ink-3">{labels.vendor(system)}</p>
@@ -229,15 +248,18 @@ function SystemCard({ system, canManage, autoSync, onManage, onChanged }: {
   );
 }
 
-function ManageSystem({ system, canManage, autoSync, labLinking, onClose, onChanged, onReconnect }: {
-  system: ConnectedSystem; canManage: boolean; autoSync: boolean; labLinking: boolean; onClose: () => void; onChanged: () => void; onReconnect: () => void;
+function ManageSystem({ system, canManage, autoSync, labLinking, storeKeys, onClose, onChanged, onReconnect }: {
+  system: ConnectedSystem; canManage: boolean; autoSync: boolean; labLinking: boolean; storeKeys: boolean; onClose: () => void; onChanged: () => void;
+  onReconnect: (choice: Choice) => void;
 }) {
   const tx = useTx();
   const labels = useSystemLabels();
   const [name, setName] = useState(system.customName ?? "");
-  const [busy, setBusy] = useState<"" | "rename" | "test" | "disconnect" | "sync" | "reconnect">("");
+  const [busy, setBusy] = useState<"" | "rename" | "test" | "disconnect" | "sync" | "reconnect" | "remove">("");
   const [error, setError] = useState("");
   const [confirmOff, setConfirmOff] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const apiKey = byApiKey(system);
   const [tests, setTests] = useState<Record<string, boolean | string>>({});
   const st = STATUS_UI[system.status];
   const active = system.channels.filter((c) => c.conn.status !== "disconnected");
@@ -279,6 +301,15 @@ function ManageSystem({ system, canManage, autoSync, labLinking, onClose, onChan
     try { for (const { conn } of active) await api(`/integrations/connections/${conn.id}`, { method: "DELETE" });
       toast(tx("Disconnected", "تم قطع الاتصال"), tx("Your imported sales were kept.", "تم الاحتفاظ بمبيعاتك المستوردة."), "ok"); setConfirmOff(false); onChanged(); }
     catch (e) { fail(e); } finally { setBusy(""); }
+  }
+  // Remove = stop syncing + hide from your systems. Every imported invoice, return and the
+  // history stay; linking the same system again later continues without duplicates.
+  async function remove() {
+    setBusy("remove"); setError("");
+    try { for (const { conn } of system.channels) await api(`/integrations/connections/${conn.id}/remove`, { method: "POST" });
+      toast(tx("System removed", "تمت إزالة النظام"), tx("Its sales, returns and history stay in IDRAK.", "بقيت مبيعاته ومرتجعاته وسجلاته في إدراك."), "ok");
+      onChanged(); onClose(); }
+    catch (e) { fail(e); setBusy(""); }
   }
 
   return (
@@ -323,7 +354,8 @@ function ManageSystem({ system, canManage, autoSync, labLinking, onClose, onChan
           <div className="mt-5 flex flex-wrap gap-2">
             {active.length > 0 && <Button size="sm" onClick={sync} loading={busy === "sync"} disabled={!!busy}><RefreshCw size={14} />{tx("Sync now", "مزامنة الآن")}</Button>}
             {active.length > 0 && <Button size="sm" variant="secondary" onClick={runTests} loading={busy === "test"} disabled={!!busy}><FlaskConical size={14} />{tx("Test connection", "اختبار الاتصال")}</Button>}
-            {system.status === "disconnected" && system.kind === "lab" && labLinking && <Button size="sm" onClick={onReconnect} disabled={!!busy}><PlugZap size={14} />{tx("Reconnect (owner approval)", "إعادة الربط (بموافقة المالك)")}</Button>}
+            {system.status === "disconnected" && system.kind === "lab" && !apiKey && labLinking && <Button size="sm" onClick={() => onReconnect("lab")} disabled={!!busy}><PlugZap size={14} />{tx("Reconnect (owner approval)", "إعادة الربط (بموافقة المالك)")}</Button>}
+            {apiKey && storeKeys && (system.status !== "connected") && <Button size="sm" onClick={() => onReconnect("storekey")} disabled={!!busy}><KeyRound size={14} />{tx("Reconnect with an API key", "إعادة الربط بمفتاح API")}</Button>}
             {system.status === "disconnected" && system.kind === "demo" && <Button size="sm" onClick={reconnectDemo} loading={busy === "reconnect"} disabled={!!busy}><PlugZap size={14} />{tx("Reconnect", "إعادة الربط")}</Button>}
           </div>
 
@@ -346,8 +378,32 @@ function ManageSystem({ system, canManage, autoSync, labLinking, onClose, onChan
               ) : (
                 <Button size="sm" variant="ghost" onClick={() => setConfirmOff(true)} disabled={!!busy}><Unplug size={13} />{tx("Disconnect…", "قطع الاتصال…")}</Button>
               )}
+              <p className="mt-1 text-[11.5px] text-ink-3">{tx("Stops syncing. The system stays in your list so you can reconnect it.", "يوقف المزامنة، ويبقى النظام في قائمتك لتعيد ربطه.")}</p>
             </div>
           )}
+
+          <div className="mt-3 rounded-xl border border-danger/25 p-3">
+            {confirmRemove ? (
+              <div role="alertdialog" aria-labelledby="rm-title" aria-describedby="rm-body">
+                <p id="rm-title" className="font-medium text-ink">{tx(`Remove “${labels.name(system)}”?`, `إزالة «${labels.name(system)}»؟`)}</p>
+                <ul id="rm-body" className="mt-2 list-disc space-y-1 ps-5 text-[12.5px] text-ink-2">
+                  <li>{tx("Syncing stops and the connection is turned off at the source.", "تتوقف المزامنة ويُعطَّل الاتصال من جهة النظام.")}</li>
+                  <li>{tx("It disappears from your active systems.", "يختفي من قائمة أنظمتك النشطة.")}</li>
+                  <li>{tx("All imported invoices, sales, returns, profits and the audit history are kept.", "تبقى كل الفواتير والمبيعات والمرتجعات والأرباح وسجلات التدقيق المستوردة.")}</li>
+                  <li>{tx("You can link it again later without duplicate invoices.", "يمكنك ربطه لاحقًا من جديد دون تكرار الفواتير.")}</li>
+                </ul>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" variant="danger" onClick={remove} loading={busy === "remove"}><Trash2 size={13} />{tx("Remove system", "إزالة النظام")}</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirmRemove(false)} disabled={busy === "remove"}>{tx("Cancel", "إلغاء")}</Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmRemove(true)} disabled={!!busy} className="text-danger"><Trash2 size={13} />{tx("Remove system…", "إزالة النظام…")}</Button>
+                <p className="mt-1 text-[11.5px] text-ink-3">{tx("Disconnects and hides it from your systems. Your data stays.", "يقطع الاتصال ويخفيه من أنظمتك، وتبقى بياناتك.")}</p>
+              </>
+            )}
+          </div>
 
           <details className="mt-6 rounded-xl border border-line bg-paper-2/40 p-3">
             <summary className="cursor-pointer text-[12.5px] text-ink-3">{tx("Advanced details (for support)", "تفاصيل متقدمة (للدعم الفني)")}</summary>

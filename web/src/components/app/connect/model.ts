@@ -14,7 +14,7 @@ export type Connection = {
   last_sync_at: string | null; last_success_at: string | null; last_error: string | null;
   sync_count: number; open_errors: number; group_key: string;
   account_ref?: string; // managers only (advanced details)
-  config?: { channel?: string; auto_sync?: boolean; paired_lab?: boolean } | null;
+  config?: { channel?: string; auto_sync?: boolean; paired_lab?: boolean; store_api_key?: boolean } | null;
   auto_sync_effective?: boolean; // server truth: syncs without "Sync now" right now
 };
 export type Provider = {

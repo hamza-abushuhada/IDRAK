@@ -3,8 +3,8 @@
 import { useState } from "react";
 import clsx from "clsx";
 import {
-  ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, Globe, HelpCircle, Loader2, LogIn, ShieldCheck,
-  ShoppingBag, Sparkles, Undo2, XCircle,
+  ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, Globe, HelpCircle, KeyRound, Loader2, LogIn, ShieldCheck,
+  ShoppingBag, Undo2, XCircle,
 } from "lucide-react";
 import { useTx } from "@/i18n";
 import { api, ApiError, getOrgId } from "@/lib/api";
@@ -15,21 +15,24 @@ import { Drawer } from "@/components/workspace/common";
 import LabPairing, { type Paired } from "@/components/app/LabPairing";
 import { friendlyError, PHASES, phaseOf, type Provider, type WizardStep } from "./model";
 import { savePending } from "./pending";
+import { POS_VENDORS, VendorLogo } from "./vendors";
 
 type SystemType = "pos" | "store";
-type Choice = "lab" | "demo" | "loyverse";
+export type Choice = "lab" | "loyverse" | "storekey";
 type Check = { name: string; ok: boolean };
 type TestResult = { ok: boolean; checks: Check[] };
 
 // The manual pairing-code method stays as an admin fallback, reachable only with ?pairing=manual.
 const manualPairing = () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("pairing") === "manual";
 
-export default function ConnectWizard({ open, onOpenChange, providers, labLinking, loyverseAvailable = false, initialChoice, onConnected }: {
+export default function ConnectWizard({ open, onOpenChange, providers, labLinking, loyverseAvailable = false, storeKeyAvailable = false, initialChoice, onConnected }: {
   open: boolean; onOpenChange: (o: boolean) => void; providers: Provider[] | undefined;
   /** The server can really link a Lab shop here (true on Staging). Demo POS never depends on it. */
   labLinking: boolean;
   /** Hidden until a real Loyverse integration is proven (server flag + registered app). */
   loyverseAvailable?: boolean;
+  /** Online store by API key (IDRAK Connect Lab store), only where the server enables it. */
+  storeKeyAvailable?: boolean;
   initialChoice?: Choice | null; onConnected: () => void;
 }) {
   const tx = useTx();
@@ -42,17 +45,19 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [test, setTest] = useState<{ id: string; channel: string; result: TestResult | null; error?: string }[]>([]);
+  const [store, setStore] = useState({ url: "", key: "" });
+  const [checked, setChecked] = useState<{ name: string; elsewhere: boolean } | null>(null);
 
   // Only systems that can really be linked here are offered. Nothing "coming soon" is selectable.
   const has = (code: string) => !!providers?.some((p) => p.code === code && p.is_implemented);
   const labAvailable = labLinking && has("lab_pos") && has("lab_web") && !!LAB_LOGIN_URL;
-  const demoAvailable = has("demo");
-  const options = { lab: labAvailable, demo: type === "pos" && demoAvailable, loyverse: type === "pos" && loyverseAvailable };
+  // Demo POS is not offered to merchants for new links (its backend and existing connections stay).
+  const options = { lab: labAvailable, loyverse: type === "pos" && loyverseAvailable, storekey: type === "store" && storeKeyAvailable && has("lab_web") };
 
   function reset(o: boolean) {
     if (!o) {
       setStep(initialChoice ? "connect" : "type"); setChoice(initialChoice ?? null); setConnIds([]); setName("");
-      setError(""); setTest([]); setBusy(false);
+      setError(""); setTest([]); setBusy(false); setStore({ url: "", key: "" }); setChecked(null);
     }
     onOpenChange(o);
   }
@@ -90,12 +95,31 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
     } catch (e) { fail(e); setBusy(false); }
   }
 
-  async function connectDemo() {
+  async function testStore() {
+    setBusy(true); setError(""); setChecked(null);
+    try {
+      const r = await api<{ ok: boolean; store: { name: string }; already_linked_elsewhere: boolean }>(
+        "/integrations/store-key/test", { method: "POST", json: { store_url: store.url.trim(), api_key: store.key.trim() } });
+      setChecked({ name: r.store.name, elsewhere: r.already_linked_elsewhere });
+    } catch (e) { storeFail(e); } finally { setBusy(false); }
+  }
+
+  async function connectStore() {
     setBusy(true); setError("");
     try {
-      const r = await api<{ connection: { id: string } }>("/integrations/connections", { method: "POST", json: { provider_code: "demo" } });
+      const r = await api<{ connection: { id: string } }>(
+        "/integrations/store-key/connect", { method: "POST", json: { store_url: store.url.trim(), api_key: store.key.trim() } });
+      setStore({ url: "", key: "" }); // the key never stays in the page after linking
       setConnIds([r.connection.id]); onConnected(); go("name");
-    } catch (e) { fail(e); } finally { setBusy(false); }
+    } catch (e) { storeFail(e); } finally { setBusy(false); }
+  }
+
+  function storeFail(e: unknown) {
+    const status = e instanceof ApiError ? e.status : undefined;
+    setError(status === 400 ? tx("Check the store address and the key format. Only the IDRAK Connect Lab store address is accepted.", "تحقّق من عنوان المتجر وصيغة المفتاح. يُقبل عنوان متجر IDRAK Connect Lab فقط.")
+      : status === 422 ? tx("The store didn't accept this API key. It may be wrong, revoked or expired: create a new key in your store.", "لم يقبل المتجر مفتاح API هذا. قد يكون خاطئًا أو ملغى أو منتهي الصلاحية: أنشئ مفتاحًا جديدًا من متجرك.")
+      : status === 409 ? tx("This store is already linked to another business, or to this one through owner approval.", "هذا المتجر مرتبط بمؤسسة أخرى، أو مرتبط بهذه المؤسسة عبر موافقة المالك.")
+      : friendlyError(status, tx.isAr));
   }
 
   function paired(result: Paired) {
@@ -112,7 +136,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
   }
 
   async function runTest() {
-    const rows = connIds.map((id, i) => ({ id, channel: choice === "demo" || i === 0 ? "pos" : "web", result: null as TestResult | null }));
+    const rows = connIds.map((id, i) => ({ id, channel: choice === "storekey" || i > 0 ? "web" : "pos", result: null as TestResult | null }));
     setTest(rows);
     const out = [];
     for (const row of rows) {
@@ -160,25 +184,28 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
         <section aria-labelledby="w-provider">
           <h3 id="w-provider" className="font-serif text-[17px] text-ink">{tx("Choose your system", "اختر نظامك")}</h3>
           <div className="mt-4 space-y-3">
+            {options.loyverse && (
+              <ProviderOption onClick={() => { setChoice("loyverse"); go("connect"); }} logo={<VendorLogo code="loyverse" name="Loyverse POS" />}
+                title="Loyverse POS" badge={<Badge tone="olive">{tx("Available now", "متاح الآن")}</Badge>}
+                body={tx("Connect your Loyverse account. You sign in at Loyverse and approve read-only access to your receipts.", "اربط حسابك في Loyverse. تسجّل الدخول في Loyverse وتوافق على قراءة فواتيرك فقط.")}
+                method={tx("Sign in to Loyverse and approve", "تسجيل الدخول إلى Loyverse والموافقة")} />
+            )}
+            {options.storekey && (
+              <ProviderOption onClick={() => { setChoice("storekey"); go("connect"); }}
+                logo={<span className="grid size-10 shrink-0 place-items-center rounded-xl bg-terra-soft text-terra-2"><KeyRound size={18} /></span>}
+                title={tx("IDRAK Connect Lab online store", "المتجر الإلكتروني في IDRAK Connect Lab")}
+                badge={<><Badge tone="olive">{tx("Available now", "متاح الآن")}</Badge><Badge tone="saffron"><FlaskConical size={11} />{tx("Test system", "نظام اختبار")}</Badge></>}
+                body={tx("Link the Lab's standalone online store with a read-only API key you create in the store.", "اربط المتجر الإلكتروني المستقل في Lab بمفتاح API للقراءة فقط تنشئه من متجرك.")}
+                method={tx("Connect via API key", "ربط عبر API Key")} />
+            )}
             {options.lab && (
               <ProviderOption onClick={() => { setChoice("lab"); go("connect"); }}
+                logo={<span className="grid size-10 shrink-0 place-items-center rounded-xl bg-saffron-soft text-[#8a5d0e]"><FlaskConical size={18} /></span>}
                 title="IDRAK Connect Lab" badge={<Badge tone="saffron"><FlaskConical size={11} />{tx("Test system", "نظام اختبار")}</Badge>}
                 body={tx("A practice cashier and online store for trying the connection. Not a real sales system.", "كاشير ومتجر إلكتروني للتجربة فقط، لاختبار الربط. ليس نظام مبيعات حقيقيًا.")}
                 method={tx("Sign in to the test system and approve", "تسجيل الدخول إلى نظام الاختبار والموافقة")} />
             )}
-            {options.loyverse && (
-              <ProviderOption onClick={() => { setChoice("loyverse"); go("connect"); }}
-                title="Loyverse POS" badge={<Badge tone="neutral">{tx("Cashier system", "نظام كاشير")}</Badge>}
-                body={tx("Connect your Loyverse account. You sign in at Loyverse and approve read-only access to your receipts.", "اربط حسابك في Loyverse. تسجّل الدخول في Loyverse وتوافق على قراءة فواتيرك فقط.")}
-                method={tx("Sign in to Loyverse and approve", "تسجيل الدخول إلى Loyverse والموافقة")} />
-            )}
-            {options.demo && (
-              <ProviderOption onClick={() => { setChoice("demo"); go("connect"); }}
-                title={tx("Demo POS", "كاشير تجريبي")} badge={<Badge tone="neutral"><Sparkles size={11} />{tx("Sample data", "بيانات وهمية")}</Badge>}
-                body={tx("Fills IDRAK with sample sales so you can explore the reports. No real system or shop is connected.", "يضيف مبيعات وهمية لتجربة التقارير في إدراك. لا يرتبط بأي نظام أو محل حقيقي.")}
-                method={tx("One click, nothing to set up", "بضغطة واحدة، دون أي إعداد")} />
-            )}
-            {!options.lab && !options.demo && !options.loyverse && (
+            {!options.lab && !options.loyverse && !options.storekey && (
               <p className="rounded-xl border border-dashed border-line bg-paper-2/40 p-4 text-[13px] text-ink-2">
                 {type === "store"
                   ? tx("Online stores can't be connected directly yet.", "لا يمكن ربط المتاجر الإلكترونية مباشرة بعد.")
@@ -186,6 +213,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
               </p>
             )}
           </div>
+          {type === "pos" && <ComingSoon />}
           <NotListed />
           <div className="mt-5"><Button variant="ghost" size="sm" onClick={() => go("type")}><Back size={14} />{tx("Back", "رجوع")}</Button></div>
         </section>
@@ -235,14 +263,45 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
         </section>
       )}
 
-      {step === "connect" && choice === "demo" && (
-        <section aria-labelledby="w-demo">
-          <h3 id="w-demo" className="font-serif text-[17px] text-ink">{tx("Add the demo POS", "إضافة الكاشير التجريبي")}</h3>
-          <p className="mt-3 text-[13.5px] text-ink-2">{tx("IDRAK will add sample sales to this business so you can see how syncing and reports work. You can disconnect it at any time; the sample sales stay.", "سيضيف إدراك مبيعات وهمية إلى هذه المؤسسة لترى كيف تعمل المزامنة والتقارير. يمكنك قطع الاتصال في أي وقت، وتبقى المبيعات الوهمية.")}</p>
-          <div className="mt-5 flex flex-wrap gap-2">
-            {!initialChoice && <Button variant="ghost" size="sm" onClick={() => go("provider")} disabled={busy}><Back size={14} />{tx("Back", "رجوع")}</Button>}
-            <Button onClick={connectDemo} loading={busy} disabled={busy}>{tx("Add demo POS", "إضافة الكاشير التجريبي")}</Button>
-          </div>
+      {step === "connect" && choice === "storekey" && (
+        <section aria-labelledby="w-storekey">
+          <h3 id="w-storekey" className="font-serif text-[17px] text-ink">{tx("Connect via API key", "ربط عبر API Key")}</h3>
+          <ol className="mt-3 list-decimal space-y-1.5 ps-5 text-[13px] text-ink-2">
+            <li>{tx("Open your online store in IDRAK Connect Lab and sign in as the owner.", "افتح متجرك الإلكتروني في IDRAK Connect Lab وسجّل الدخول كمالك.")}</li>
+            <li>{tx("Open “API keys”, create a key, and copy it with the store address.", "افتح «مفاتيح API»، أنشئ مفتاحًا، وانسخه مع عنوان المتجر.")}</li>
+            <li>{tx("Paste both here, test the connection, then link.", "الصقهما هنا، اختبر الاتصال، ثم اربط المتجر.")}</li>
+          </ol>
+          {LAB_LOGIN_URL && (
+            <a href={new URL(LAB_LOGIN_URL).origin + "/shop"} target="_blank" rel="noopener noreferrer" className="mt-3 inline-flex items-center gap-1 text-[12.5px] text-terra-2 underline">
+              {tx("Open the Lab store", "فتح متجر Lab")}<ExternalLink size={12} />
+            </a>
+          )}
+          <form className="mt-4 space-y-3" onSubmit={(e) => { e.preventDefault(); void testStore(); }} autoComplete="off">
+            <div>
+              <label htmlFor="w-store-url" className="block text-[13px] font-medium text-ink-2">{tx("Store address", "عنوان المتجر")}</label>
+              <Input id="w-store-url" className="mt-1" dir="ltr" inputMode="url" value={store.url} maxLength={300} required
+                placeholder="https://…" onChange={(e) => { setStore((v) => ({ ...v, url: e.target.value })); setChecked(null); }} />
+            </div>
+            <div>
+              <label htmlFor="w-store-key" className="block text-[13px] font-medium text-ink-2">{tx("API key", "مفتاح API")}</label>
+              <Input id="w-store-key" className="mt-1 font-mono" dir="ltr" type="password" autoComplete="off" spellCheck={false} value={store.key} maxLength={120} required
+                placeholder="lsk_…" onChange={(e) => { setStore((v) => ({ ...v, key: e.target.value })); setChecked(null); }} />
+              <p className="mt-1 text-[12px] text-ink-3">{tx("Read-only access to this store's orders. IDRAK stores it encrypted and never shows it again.", "صلاحية قراءة طلبات هذا المتجر فقط. يحفظه إدراك مشفّرًا ولا يعرضه مرة أخرى.")}</p>
+            </div>
+            {checked && (
+              <p role="status" className={clsx("flex items-start gap-2 rounded-lg p-3 text-[13px]", checked.elsewhere ? "bg-danger/10 text-danger" : "bg-olive-soft text-ink")}>
+                {checked.elsewhere ? <XCircle size={16} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-olive" />}
+                {checked.elsewhere
+                  ? tx("The key works, but this store is already linked to another business.", "المفتاح يعمل، لكن هذا المتجر مرتبط بمؤسسة أخرى.")
+                  : tx(`Connection works: “${checked.name}”. You can link it now.`, `الاتصال يعمل: «${checked.name}». يمكنك ربطه الآن.`)}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2 pt-1">
+              {!initialChoice && <Button type="button" variant="ghost" size="sm" onClick={() => go("provider")} disabled={busy}><Back size={14} />{tx("Back", "رجوع")}</Button>}
+              <Button type="submit" variant="secondary" loading={busy && !checked} disabled={busy || !store.url.trim() || !store.key.trim()}><ShieldCheck size={14} />{tx("Test connection", "اختبار الاتصال")}</Button>
+              <Button type="button" onClick={connectStore} loading={busy && !!checked} disabled={busy || !checked || checked.elsewhere}>{tx("Link store", "ربط المتجر")}</Button>
+            </div>
+          </form>
         </section>
       )}
 
@@ -260,7 +319,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
           <p className="mt-1 text-[13px] text-ink-3">{tx("A name you'll recognize in your systems list. You can change it later.", "اسم تعرفه بسهولة في قائمة أنظمتك. يمكنك تغييره لاحقًا.")}</p>
           <label htmlFor="w-name-input" className="mt-4 block text-[13px] font-medium text-ink-2">{tx("Name", "الاسم")}</label>
           <Input id="w-name-input" className="mt-1" value={name} onChange={(e) => setName(e.target.value)} maxLength={60}
-            placeholder={choice === "demo" ? tx("e.g. Demo POS", "مثال: الكاشير التجريبي") : tx("e.g. Downtown branch", "مثال: فرع وسط البلد")} />
+            placeholder={choice === "storekey" ? tx("e.g. Online store", "مثال: المتجر الإلكتروني") : tx("e.g. Downtown branch", "مثال: فرع وسط البلد")} />
           <div className="mt-5 flex flex-wrap gap-2">
             <Button onClick={saveName} loading={busy} disabled={busy}>{name.trim() ? tx("Save and check connection", "حفظ وفحص الاتصال") : tx("Skip and check connection", "تخطٍّ وفحص الاتصال")}</Button>
           </div>
@@ -276,7 +335,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
                 {!t.result && !t.error ? <Loader2 size={16} className="mt-0.5 animate-spin text-terra" />
                   : t.result?.ok ? <CheckCircle2 size={16} className="mt-0.5 text-olive" /> : <XCircle size={16} className="mt-0.5 text-danger" />}
                 <span>
-                  <span className="font-medium text-ink">{choice === "demo" ? tx("Demo POS", "الكاشير التجريبي") : t.channel === "pos" ? tx("Cashier", "الكاشير") : tx("Online store", "المتجر الإلكتروني")}</span>
+                  <span className="font-medium text-ink">{t.channel === "pos" ? tx("Cashier", "الكاشير") : tx("Online store", "المتجر الإلكتروني")}</span>
                   <span className="block text-[12.5px] text-ink-3">{!t.result && !t.error ? tx("Checking…", "جارٍ الفحص…")
                     : t.result?.ok ? tx("Working: sales can be read.", "يعمل: يمكن قراءة المبيعات.")
                     : t.error || tx("Connected, but the check didn't pass. Try again in a moment.", "تم الربط لكن الفحص لم ينجح. أعد المحاولة بعد قليل.")}</span>
@@ -321,16 +380,40 @@ function NotListed() {
   );
 }
 
-function ProviderOption({ title, badge, body, method, onClick }: {
-  title: string; badge: React.ReactNode; body: string; method: string; onClick: () => void;
+function ProviderOption({ title, badge, body, method, onClick, logo }: {
+  title: string; badge: React.ReactNode; body: string; method: string; onClick: () => void; logo?: React.ReactNode;
 }) {
   const tx = useTx();
   return (
     <button type="button" onClick={onClick}
-      className="w-full rounded-xl border border-line bg-paper p-4 text-start transition hover:border-terra hover:bg-terra-soft/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-terra">
-      <span className="flex flex-wrap items-center gap-2"><span className="font-medium text-ink">{title}</span>{badge}</span>
-      <span className="mt-1 block text-[12.5px] leading-relaxed text-ink-3">{body}</span>
-      <span className="mt-2 block text-[11.5px] text-ink-3">{tx("How it connects:", "طريقة الربط:")} {method}</span>
+      className="flex w-full items-start gap-3 rounded-xl border border-line bg-paper p-4 text-start transition hover:border-terra hover:bg-terra-soft/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-terra">
+      {logo}
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-2"><span className="font-medium text-ink">{title}</span>{badge}</span>
+        <span className="mt-1 block text-[12.5px] leading-relaxed text-ink-3">{body}</span>
+        <span className="mt-2 block text-[11.5px] text-ink-3">{tx("How it connects:", "طريقة الربط:")} {method}</span>
+      </span>
     </button>
+  );
+}
+
+/** Systems we are building: shown for information only. No button, link or form, so nothing
+ *  suggests they can be connected before a real, tested connector exists. */
+function ComingSoon() {
+  const tx = useTx();
+  const soon = POS_VENDORS.filter((v) => v.status === "soon");
+  return (
+    <div className="mt-5">
+      <h4 className="text-[12.5px] font-medium text-ink-2">{tx("Coming soon", "قريبًا")}</h4>
+      <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2" aria-label={tx("Systems coming soon", "أنظمة قريبًا")}>
+        {soon.map((v) => (
+          <li key={v.code} className="flex items-center gap-3 rounded-xl border border-dashed border-line bg-paper-2/40 p-3">
+            <VendorLogo code={v.code} name={v.name} size={36} />
+            <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{v.name}</span>
+            <Badge tone="neutral">{tx("Coming soon", "قريبًا")}</Badge>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

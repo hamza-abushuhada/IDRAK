@@ -18,6 +18,7 @@ from ..services.pos import pipeline, registry
 from ..services.pos import pairing
 from ..services.pos import autosync
 from ..services.pos import loyverse_oauth
+from ..services.pos import store_key
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -120,7 +121,7 @@ _CONN_COLS = ("c.id, c.provider_code, c.account_ref, c.display_name, c.status, c
              "c.last_success_at, c.last_error, c.sync_count, c.created_at, c.updated_at")
 
 
-_PUBLIC_CONFIG = ("channel", "auto_sync", "paired_lab")
+_PUBLIC_CONFIG = ("channel", "auto_sync", "paired_lab", "store_api_key")
 
 
 def _public(conn, ctx: Ctx | None = None) -> dict:
@@ -155,7 +156,9 @@ async def integration_status(ctx: Ctx = Depends(require("view_dashboard"))):
     # (e.g. Staging). Demo POS never depends on it.
     return {"auto_sync_active": auto_sync_active(), "lab_linking": pairing.linking_available(),
             # Hidden from users until a real Loyverse integration is proven (server flag + credentials).
-            "loyverse_available": loyverse_oauth.available()}
+            "loyverse_available": loyverse_oauth.available(),
+            # Online store by API key: Staging first (IDRAK_STORE_API_KEYS=on), then production.
+            "store_key_available": store_key.available()}
 
 
 class RenameIn(BaseModel):
@@ -191,7 +194,7 @@ async def list_connections(ctx: Ctx = Depends(require("view_dashboard"))):
                   p.name as provider_name, p.name_ar as provider_name_ar, p.category as provider_category,
                   (select count(*) from pos_sync_errors e where e.connection_id=c.id and e.status='open') open_errors
            from pos_connections c join pos_providers p on p.code=c.provider_code
-           where c.org_id=$1 order by c.created_at desc""", ctx.org_id)
+           where c.org_id=$1 and c.removed_at is null order by c.created_at desc""", ctx.org_id)
     return [_public(r, ctx) for r in rows]
 
 
@@ -335,12 +338,10 @@ async def disconnect(conn_id: str, purge: bool = False, ctx: Ctx = Depends(requi
     """قطع الاتصال. الافتراضي قطع ناعم (يوقف المزامنة ويُبقي البيانات).
     purge=true يحذف الاتصال وكل مبيعاته وأصنافه التي لم تُستخدم في مبيعات أخرى
     — حذف لا يُتراجَع عنه، تؤكّده الواجهة أولاً."""
-    conn = await db.fetchrow("select id, provider_code, account_ref from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
+    conn = await db.fetchrow("select id, provider_code, account_ref, config from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
     if not conn:
         raise HTTPException(404, "Connection not found")
-    if conn["provider_code"] == "loyverse":
-        # Stop at the source too: remove our webhook and wipe stored tokens (sales stay).
-        await loyverse_oauth.disconnect(dict(conn), ctx.org_id)
+    await _stop_at_source(conn, ctx.org_id)
     if not purge:
         await db.execute("update pos_connections set status='disconnected', updated_at=now() where id=$1 and org_id=$2",
                          conn_id, ctx.org_id)
@@ -358,6 +359,84 @@ async def disconnect(conn_id: str, purge: bool = False, ctx: Ctx = Depends(requi
     counts = {"sales": int(s.split()[-1]), "products": int(p.split()[-1])}
     await db.audit(ctx.org_id, ctx.user.id, "pos.purged", "pos_connection", conn_id, counts)
     return {"ok": True, "purged": True, "deleted": counts}
+
+
+async def _stop_at_source(conn, org_id: str) -> None:
+    """Stop the source side too (sales stay): Loyverse webhooks + tokens, store API key + notifications."""
+    if conn["provider_code"] == "loyverse":
+        await loyverse_oauth.disconnect(dict(conn), org_id)
+    elif (conn["config"] or {}).get("store_api_key"):
+        await store_key.disconnect(dict(conn), org_id)
+
+
+@router.post("/connections/{conn_id}/remove")
+async def remove_connection(conn_id: str, ctx: Ctx = Depends(require("manage_integrations"))):
+    """«إزالة النظام»: قطع الاتصال + إخفاؤه من الأنظمة النشطة. لا يحذف أي فاتورة أو
+    مرتجع أو سجلّ مزامنة أو تدقيق؛ وإعادة الربط لاحقًا تستأنف بنفس هوية المصدر فلا تكرار."""
+    conn = await db.fetchrow("select id, provider_code, account_ref, config, status from pos_connections where id=$1 and org_id=$2",
+                             conn_id, ctx.org_id)
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    await _stop_at_source(conn, ctx.org_id)
+    await db.execute("update pos_connections set status='disconnected', removed_at=now(), updated_at=now() where id=$1 and org_id=$2",
+                     conn_id, ctx.org_id)
+    kept = await db.fetchval("select count(*) from sales where pos_connection_id=$1 and org_id=$2", conn_id, ctx.org_id)
+    await db.audit(ctx.org_id, ctx.user.id, "pos.removed", "pos_connection", conn_id,
+                   {"provider": conn["provider_code"], "sales_kept": kept})
+    db.cache_clear()
+    return {"ok": True, "removed": True, "sales_kept": kept}
+
+
+class StoreKeyIn(BaseModel):
+    store_url: str
+    api_key: str
+
+
+@router.post("/store-key/test")
+async def store_key_test(body: StoreKeyIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    """Check the store address + API key with the store itself. Nothing is saved."""
+    if not store_key.available():
+        raise HTTPException(503, "Online store linking is not available")
+    return JSONResponse(await store_key.test(body.store_url, body.api_key, ctx), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/store-key/connect")
+async def store_key_connect(body: StoreKeyIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    """Link the store to THIS business; the key is stored encrypted and never returned."""
+    if not store_key.available():
+        raise HTTPException(503, "Online store linking is not available")
+    linked = await store_key.connect(body.store_url, body.api_key, ctx)
+    conn = await db.fetchrow(f"select {_CONN_COLS} from pos_connections c where c.id=$1 and c.org_id=$2", linked["connection_id"], ctx.org_id)
+    # Reconnect resumes from the saved cursor; a new link imports the history. Identity prevents duplicates either way.
+    result = await pipeline.run_sync(ctx.org_id, ctx.user.id, dict(conn), trigger="manual" if linked["reconnected"] else "initial",
+                                     initial=not linked["reconnected"])
+    return JSONResponse({"connection": _public(await _detail(linked["connection_id"], ctx.org_id), ctx), "sync": result,
+                         "reconnected": linked["reconnected"], "notifications": linked["notifications"]},
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/store/notify", status_code=202)
+async def store_notify(request: Request):
+    """Signed "store changed" signal for a store linked by API key (server-to-server).
+    Per-key HMAC + time window + single-use nonce; carries no order data."""
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > store_key.MAX_BODY:
+            raise HTTPException(413, "Too large")
+    try:
+        result = await store_key.handle_notify(bytes(raw), request.headers.get("x-idrak-signature", ""))
+    except store_key.Rejected:
+        raise HTTPException(401, "Invalid notification") from None
+    return JSONResponse(result, status_code=202, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/catch-up")
+async def catch_up(ctx: Ctx = Depends(require("view_dashboard"))):
+    """Pull stores linked by API key that haven't synced recently (missed notifications)."""
+    if not store_key.available():
+        return {"checked": 0, "imported": 0}
+    return await store_key.catch_up(ctx.org_id)
 
 
 @router.post("/connections/{conn_id}/test")
