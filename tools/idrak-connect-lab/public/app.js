@@ -13,10 +13,23 @@ function toast(message,error=false){const old=document.querySelector('.toast');i
 async function api(path,options={}){
   const prefix=page==='inbox' && location.pathname.startsWith('/simulator') ? '/simulator' : '';
   const r=await fetch(prefix+path,{headers:{'Content-Type':'application/json'},...options});
+  if(r.status===401){location.replace('/login');throw new Error('انتهت جلسة الدخول');}
   const data=await r.json();
   if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);
   return data;
 }
+// The server chooses the shop. No credentials or shop selector are persisted here.
+fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
+  if(!session)return;
+  const nav=document.querySelector('.nav');
+  const label=document.createElement('span');label.className='pill';label.textContent=session.name;
+  nav?.append(label);
+  if(session.kind==='shop'){
+    const button=document.createElement('button');button.className='btn secondary small';button.textContent='تسجيل الخروج';
+    button.onclick=async()=>{await fetch('/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});location.replace('/login');};
+    nav?.append(button);
+  }
+}).catch(()=>{});
 function renderProducts(){
   const node=$('products');if(!node)return;
   node.innerHTML=products.map(p=>`<article class="product"><div class="emoji">${p.emoji}</div><span class="name">${esc(p.name_ar)}</span><span class="stock">متوفر: ${p.stock} قطعة</span><div class="footer"><strong class="price">${fmt(p.price)}</strong><button class="btn small" data-add="${p.sku}" ${p.stock<=0?'disabled':''}>إضافة +</button></div></article>`).join('');
