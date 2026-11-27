@@ -405,11 +405,11 @@ function ComingSoon() {
   return (
     <div className="mt-5">
       <h4 className="text-[12.5px] font-medium text-ink-2">{tx("Coming soon", "قريبًا")}</h4>
-      <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2" aria-label={tx("Systems coming soon", "أنظمة قريبًا")}>
+      <ul className="mt-2 grid grid-cols-1 gap-2" aria-label={tx("Systems coming soon", "أنظمة قريبًا")}>
         {soon.map((v) => (
           <li key={v.code} className="flex items-center gap-3 rounded-xl border border-dashed border-line bg-paper-2/40 p-3">
             <VendorLogo code={v.code} name={v.name} size="sm" />
-            <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{v.name}</span>
+            <span className="min-w-0 flex-1 text-[13px] text-ink-2"><bdi>{v.name}</bdi></span>
             <Badge tone="neutral">{tx("Coming soon", "قريبًا")}</Badge>
           </li>
         ))}
