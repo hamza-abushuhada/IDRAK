@@ -152,3 +152,52 @@ class LabOriginTests(unittest.IsolatedAsyncioTestCase):
                     await pairing.redeem('c' * 43, intent, Ctx(User(user, '', None, False), org, 'manager'))
             self.assertEqual(caught.exception.status_code, 502)
             self.assertEqual(seen, [self.STAGING + '/service/pairing/exchange'])
+
+
+class LegacyLabUrlGuardTests(unittest.IsolatedAsyncioTestCase):
+    PUBLISHED = 'https://idrak-connect-lab.vercel.app'
+    STAGING = 'https://idrak-connect-lab-staging.vercel.app'
+
+    def staging_env(self, **extra):
+        return patch.dict(os.environ, {'IDRAK_LAB_ORIGIN': self.STAGING, 'IDRAK_LAB_ALLOWED_ORIGINS': self.STAGING,
+                                       'VERCEL': '', **extra})
+
+    def test_loopback_only_for_local_dev(self):
+        with patch.dict(os.environ, {'VERCEL': '', 'IDRAK_LAB_ORIGIN': ''}):
+            self.assertEqual(pairing.legacy_lab_base_url(None), 'http://127.0.0.1:8765')
+            self.assertEqual(pairing.legacy_lab_base_url('http://localhost:8765/'), 'http://localhost:8765')
+        with patch.dict(os.environ, {'VERCEL': '1'}):
+            for url in (None, 'http://127.0.0.1:8765', 'http://localhost:9000'):
+                with self.assertRaises(ValueError):
+                    pairing.legacy_lab_base_url(url)
+
+    def test_published_lab_blocked_when_other_origin_configured(self):
+        with self.staging_env():
+            with self.assertRaises(ValueError):
+                pairing.legacy_lab_base_url(self.PUBLISHED)
+            self.assertEqual(pairing.legacy_lab_base_url(self.STAGING + '/'), self.STAGING)
+
+    def test_arbitrary_and_internal_targets_blocked(self):
+        with self.staging_env():
+            for url in ('https://evil.example.org', 'http://169.254.169.254', 'https://10.0.0.5',
+                        'http://127.0.0.1@evil.example.org', 'http://127.0.0.1:8765/path', 'http://[::1]:8765',
+                        'https://' + self.STAGING[8:] + ':8443', 'file:///etc/passwd', 'gopher://127.0.0.1', 42):
+                with self.assertRaises(ValueError, msg=str(url)):
+                    pairing.legacy_lab_base_url(url)
+
+    def test_stored_published_url_never_contacted(self):
+        conn = {'provider_code': 'lab_pos', 'account_ref': 'default', 'status': 'connected',
+                'config': {'base_url': self.PUBLISHED}}
+        with self.staging_env(), patch('urllib.request.urlopen') as urlopen:
+            with self.assertRaisesRegex(ValueError, 'not allowed'):
+                pipeline.build_adapter(conn, str(uuid4()))
+            urlopen.assert_not_called()
+
+    async def test_pipeline_test_connection_skips_disconnected_and_blocked(self):
+        conn = {'provider_code': 'lab_pos', 'account_ref': 'default', 'config': {'base_url': self.PUBLISHED}}
+        with self.staging_env(), patch('urllib.request.urlopen') as urlopen:
+            r = await pipeline.test_connection({**conn, 'status': 'disconnected'}, str(uuid4()))
+            self.assertFalse(r['ok']); self.assertEqual(r['checks'][0]['name'], 'connection')
+            r = await pipeline.test_connection({**conn, 'status': 'connected'}, str(uuid4()))
+            self.assertFalse(r['ok']); self.assertIn('not allowed', r['checks'][0]['detail'])
+            urlopen.assert_not_called()

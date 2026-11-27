@@ -109,6 +109,14 @@ async def create_connection(body: ConnectIn, ctx: Ctx = Depends(require("manage_
     # الموصّل غير المنفَّذ لا يُنشئ اتصالاً فعّالاً: نرفض بوضوح بدل زرّ وهمي.
     if not provider["is_implemented"] or not registry.is_implemented(body.provider_code):
         raise HTTPException(400, "This connector type is supported architecturally but not available to connect yet")
+    if body.provider_code in ("lab_pos", "lab_web"):
+        # Unpaired Lab connections may only target an allowed Lab URL (loopback in
+        # local dev). Elsewhere a Lab shop is linked through pairing instead.
+        from ..services.pos.pairing import legacy_lab_base_url
+        try:
+            legacy_lab_base_url(_config_for(body.provider_code).get("base_url"))
+        except ValueError:
+            raise HTTPException(400, "Connect a Lab shop with a pairing code") from None
 
     account_ref = _account_ref_for(body.provider_code, body.account_ref)
     # إعادة ربط نفس المصدر (مؤسسة+مزوّد+حساب): نعيد تفعيل الاتصال القائم بدل
@@ -225,6 +233,8 @@ async def test_connection(conn_id: str, ctx: Ctx = Depends(require("manage_integ
         f"select {_CONN_COLS} from pos_connections c where c.id=$1 and c.org_id=$2", conn_id, ctx.org_id)
     if not conn:
         raise HTTPException(404, "Connection not found")
+    if conn["status"] == "disconnected":
+        raise HTTPException(409, "Connection is disconnected")
     return await pipeline.test_connection(dict(conn), ctx.org_id)
 
 

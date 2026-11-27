@@ -93,7 +93,11 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
             if password:
                 import base64
                 authorization = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
-        return cls(base_url=cfg.get("base_url") or lab.DEFAULT_BASE_URL,
+        # Server-side allowlist for unpaired Lab connections: never trust the
+        # stored URL (SSRF). Only loopback (local dev) or the active Lab origin.
+        from .pairing import legacy_lab_base_url
+        base_url = legacy_lab_base_url(cfg.get("base_url"))
+        return cls(base_url=base_url,
                    secret=secret, branch=cfg.get("branch_name") or lab.DEFAULT_BRANCH,
                    authorization=authorization)
     return cls()
@@ -507,6 +511,9 @@ async def run_webhook(org_id: str, user_id: str | None, connection: dict,
 # --------------------------------------------------------------------------
 async def test_connection(connection: dict, org_id: str) -> dict:
     checks: list[dict] = []
+    if connection.get("status") == "disconnected":
+        # Never contact a source for a connection the owner disconnected.
+        return {"ok": False, "checks": [{"name": "connection", "ok": False, "detail": "Connection is disconnected"}]}
     try:
         adp = await _adapter_for(connection, org_id)
     except ValueError as exc:
