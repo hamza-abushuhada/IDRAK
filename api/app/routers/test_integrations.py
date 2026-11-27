@@ -117,3 +117,67 @@ class ConnectGuardTests(unittest.TestCase):
             response = self.client.post("/integrations/connections", json={"provider_code": "lab_pos"})
         self.assertEqual(response.status_code, 400)
         write.assert_not_awaited()
+
+
+class ConnectUiApiTests(unittest.TestCase):
+    """Status reflects the real scheduler; responses hide internals; rename is scoped."""
+    def setUp(self):
+        self.pool_patch = patch.object(db, "init_pool", new_callable=AsyncMock)
+        self.pool_patch.start()
+        app.middleware_stack = None
+        self.client = TestClient(app, raise_server_exceptions=False)
+        self.row = {"id": "c1", "provider_code": "lab_pos", "account_ref": "shop-abc", "display_name": "Paired Lab lab_pos",
+                    "status": "connected", "cursor": {"after": 5},
+                    "config": {"paired_lab": True, "channel": "in_store", "auto_sync": True, "base_url": "https://lab.example.org",
+                               "sales_adjust_inventory": False},
+                    "provider_name": "IDRAK Lab", "provider_name_ar": None, "provider_category": "cloud_api", "open_errors": 0}
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        self.pool_patch.stop()
+        app.middleware_stack = None
+
+    def as_role(self, role):
+        app.dependency_overrides[org_ctx] = lambda: Ctx(User("user", "user@example.org", None, False), "org", role)
+
+    def test_status_reports_real_scheduler_state(self):
+        self.as_role("cashier")
+        from app.routers import integrations
+        with patch.object(integrations.db, "SERVERLESS", True), patch.dict(os.environ, {"POS_AUTOSYNC": "1"}):
+            self.assertEqual(self.client.get("/integrations/status").json(), {"auto_sync_active": False})
+        with patch.object(integrations.db, "SERVERLESS", False), patch.dict(os.environ, {"POS_AUTOSYNC": "0"}):
+            self.assertFalse(self.client.get("/integrations/status").json()["auto_sync_active"])
+        with patch.object(integrations.db, "SERVERLESS", False), patch.dict(os.environ, {"POS_AUTOSYNC": "1"}):
+            self.assertTrue(self.client.get("/integrations/status").json()["auto_sync_active"])
+
+    def test_list_hides_internals_and_account_ref_for_non_managers(self):
+        for role, sees_ref in (("cashier", False), ("manager", True)):
+            self.as_role(role)
+            with patch.object(db, "fetch", new=AsyncMock(return_value=[dict(self.row)])):
+                item = self.client.get("/integrations/connections").json()[0]
+            self.assertNotIn("cursor", item)
+            self.assertEqual(item["config"], {"paired_lab": True, "channel": "in_store", "auto_sync": True})
+            self.assertNotIn("lab.example.org", str(item))
+            self.assertEqual("account_ref" in item, sees_ref, role)
+            self.assertEqual(len(item["group_key"]), 16)
+            self.assertNotIn("shop-abc", item["group_key"])
+
+    def test_rename_requires_manager_valid_name_and_own_org(self):
+        self.as_role("cashier")
+        self.assertEqual(self.client.patch("/integrations/connections/c1", json={"display_name": "Shop"}).status_code, 403)
+        self.as_role("manager")
+        for bad in ("", "   ", "x" * 61, "bad\x07name"):
+            with patch.object(db, "fetchval", new=AsyncMock()) as write:
+                self.assertEqual(self.client.patch("/integrations/connections/c1", json={"display_name": bad}).status_code, 400, repr(bad))
+            write.assert_not_awaited()
+        with patch.object(db, "fetchval", new=AsyncMock(return_value=None)):
+            self.assertEqual(self.client.patch("/integrations/connections/other", json={"display_name": "Shop"}).status_code, 404)
+        from app.routers import integrations
+        with patch.object(db, "fetchval", new=AsyncMock(return_value="c1")) as write, patch.object(db, "audit", new=AsyncMock()), \
+                patch.object(integrations, "_detail", new=AsyncMock(return_value=dict(self.row, display_name="محل وسط البلد"))):
+            r = self.client.patch("/integrations/connections/c1", json={"display_name": "  محل   وسط البلد "})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(write.call_args.args[1:], ("c1", "org", "محل وسط البلد"))
+        self.assertIn("org_id=$2", write.call_args.args[0])
+        self.assertNotIn("base_url", r.text)
