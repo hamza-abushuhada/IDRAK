@@ -51,13 +51,20 @@ class HostedHandler(lab.SourceHandler):
         cookie_principal = browser_auth.authenticate(self.headers.get('Cookie'))
         if browser_auth.COOKIE + '=' in self.headers.get('Cookie', ''):
             self.principal = cookie_principal
-        if path in ('/login', '/login.js', '/style.css', '/auth/login', '/service/pairing/exchange') and self.principal is None:
+        if path in ('/login', '/login.js', '/activate', '/activate.js', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS and self.principal is None:
             self.principal = lab.Principal('anonymous')
+        if self.command == 'GET' and not lab.page_allowed(self.principal, path):
+            self.send_response(303)
+            self.send_header('Location', '/pos')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return False
         if self.command == 'POST':
             # Trust TLS forwarding only when explicitly configured by the operator.
             scheme = 'https' if os.environ.get('IDRAK_LAB_COOKIE_SECURE', 'yes') == 'yes' else 'http'
             headers = {k.lower(): v for k, v in self.headers.items()}
-            if not browser_auth.same_origin(headers, scheme + '://' + self.headers.get('Host', ''), cookie_auth=cookie_principal is not None or path == '/auth/login'):
+            if not browser_auth.same_origin(headers, scheme + '://' + self.headers.get('Host', ''), cookie_auth=cookie_principal is not None or path in browser_auth.PUBLIC_AUTH_PATHS):
                 self.close_connection = True
                 self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
                 return False
@@ -123,15 +130,11 @@ class HostedHandler(lab.SourceHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in ('/login', '/login.js', '/operator'):
-            return self.serve_file({'/login': 'login.html', '/login.js': 'login.js', '/operator': 'home.html'}[path])
+        pages = {'/login': 'login.html', '/login.js': 'login.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html'}
+        if path in pages:
+            return self.serve_file(pages[path])
         if path == '/auth/session':
-            def session():
-                shop = lab.effective_shop(self.principal, self.x_shop())
-                with lab.connect(lab.SOURCE_DB) as db:
-                    name = db.execute('SELECT name FROM shops WHERE shop_id=?', (shop,)).fetchone()['name']
-                return {'name': name, 'shop_id': shop, 'kind': self.principal.kind}
-            return self.guarded(session)
+            return self.guarded(lambda: browser_auth.session_info(self.principal, self.x_shop()))
         if not self._receiver('do_GET'):
             super().do_GET()
 
@@ -148,20 +151,27 @@ class HostedHandler(lab.SourceHandler):
                 return self.send_json(exc.status, {'error': str(exc)})
             except (ValueError, TypeError):
                 return self.send_json(400, {'error': 'Invalid pairing exchange'})
-        if path in ('/auth/login', '/auth/logout'):
+        if path.startswith('/auth/'):
             try:
                 body = self.read_json()
-                value = browser_auth.login(body.get('token')) if path == '/auth/login' else ''
-                self.send_response(200)
-                self.send_header('Set-Cookie', browser_auth.cookie_header(value, os.environ.get('IDRAK_LAB_COOKIE_SECURE', 'yes') == 'yes'))
+                if not isinstance(body, dict):
+                    raise ValueError('Invalid request')
+                principal = self.principal if path in ('/auth/logout', '/auth/switch-shop') else None
+                status, payload, cookie = browser_auth.handle_auth_post(path, body, principal, self.client_address[0])
+                raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+                self.send_response(status)
+                if cookie is not None:
+                    self.send_header('Set-Cookie', browser_auth.cookie_header(cookie, os.environ.get('IDRAK_LAB_COOKIE_SECURE', 'yes') == 'yes'))
                 self.send_header('Cache-Control', 'no-store')
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Content-Length', '11')
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(raw)))
                 self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                self.wfile.write(raw)
             except lab.LabAuthError as exc:
-                self.send_json(exc.status, {'error': 'Invalid shop credential'})
-            except (ValueError, TypeError, AttributeError):
+                self.send_json(exc.status, {'error': str(exc)})
+            except LookupError:
+                self.send_json(404, {'error': 'not found'})
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                 self.send_json(400, {'error': 'Invalid request'})
             return
         if not self._receiver('do_POST'):

@@ -88,8 +88,10 @@ class RouteNotFound(LookupError):
 
 @dataclass(frozen=True)
 class Principal:
-    kind: str                 # operator | shop | local | anonymous
+    kind: str                 # operator | shop | local | anonymous | integration
     shop_id: str | None = None
+    role: str | None = None   # shop sessions: 'owner' | 'cashier' (None = shop credential)
+    user_id: str | None = None  # set for email/password user sessions
 
 
 LOCAL_PRINCIPAL = Principal('local')  # unauthenticated localhost runner only
@@ -243,6 +245,8 @@ def init_db():
                        [(LEGACY_SHOP, *p) for p in SEED_PRODUCTS])
         import pairing
         db.executescript(pairing.DDL)
+        import lab_users
+        db.executescript(lab_users.DDL)
     with connect(RECEIVER_DB) as db:
         db.executescript('PRAGMA journal_mode=WAL;' + RECEIVER_DDL)
 
@@ -349,6 +353,22 @@ def effective_shop(principal, requested=None):
 def require_operator(principal):
     if principal.kind not in ('operator', 'local'):
         raise LabAuthError(403, 'Shop administration requires the operator credential')
+
+
+def require_owner(principal):
+    """Cashier sessions may only sell and read products/orders; everything else
+    for a shop needs its owner (or the shop credential / operator)."""
+    if principal.kind == 'shop' and principal.role == 'cashier':
+        raise LabAuthError(403, 'This action requires the shop owner')
+
+
+CASHIER_GET = ('/api/products', '/api/orders')
+CASHIER_POST = ('/api/pos/sales',)
+OWNER_PAGES = ('/', '/operator', '/shop', '/admin', '/simulator', '/simulator/')
+
+
+def page_allowed(principal, path):
+    return not (principal and principal.kind == 'shop' and principal.role == 'cashier' and path in OWNER_PAGES)
 
 
 def source_id(channel):
@@ -580,9 +600,27 @@ def handle_source_get(principal,x_shop,path,q):
     if path=='/health':return source_get(None,path,q)
     if path=='/api/shops':
         require_operator(principal);return list_shops()
-    return source_get(effective_shop(principal,x_shop),path,q)
+    if path not in CASHIER_GET:require_owner(principal)
+    shop=effective_shop(principal,x_shop)
+    if path=='/api/team':
+        import lab_users;return lab_users.team(shop)
+    return source_get(shop,path,q)
 
 def handle_source_post(principal,x_shop,path,req):
+    if path not in CASHIER_POST and principal.kind!='integration':require_owner(principal)
+    if path=='/api/shops/invite':
+        import lab_users
+        require_operator(principal)
+        if not set(req)<={'shop_id','email','role'}:raise ValueError('Invalid request')
+        return lab_users.create_invite(req.get('shop_id'),req.get('email'),req.get('role','owner'),'operator')
+    if path=='/api/team/invite':
+        import lab_users
+        shop=effective_shop(principal,x_shop)
+        if not set(req)<={'email','role'} or req.get('role','cashier')!='cashier':raise ValueError('Owners can invite cashiers only')
+        return lab_users.create_invite(shop,req.get('email'),'cashier',principal.user_id or 'shop-credential')
+    if path=='/api/team/remove':
+        import lab_users
+        return lab_users.remove_member(effective_shop(principal,x_shop),req.get('user_id'),principal.user_id)
     if path == '/api/pairing-codes':
         import pairing
         effective_shop(principal, x_shop)
@@ -625,6 +663,7 @@ def receiver_get(shop,path):
 
 def handle_receiver_get(principal,x_shop,path):
     if path=='/health':return {'ok':True,'service':'idrak-lab-simulator'}
+    require_owner(principal)
     return receiver_get(effective_shop(principal,x_shop),path)
 
 class BaseHandler(BaseHTTPRequestHandler):
