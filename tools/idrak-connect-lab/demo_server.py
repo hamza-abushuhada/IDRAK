@@ -231,6 +231,8 @@ def init_db():
                    (LEGACY_SHOP, 'متجر التجربة', iso_now()))
         db.executemany('INSERT OR IGNORE INTO products(shop_id,sku,name_ar,name_en,emoji,price_mils,stock) VALUES(?,?,?,?,?,?,?)',
                        [(LEGACY_SHOP, *p) for p in SEED_PRODUCTS])
+        import pairing
+        db.executescript(pairing.DDL)
     with connect(RECEIVER_DB) as db:
         db.executescript('PRAGMA journal_mode=WAL;' + RECEIVER_DDL)
 
@@ -306,6 +308,9 @@ def authenticate(authorization, path, method, operator_header):
     accepted only for data APIs, never for shop administration or static pages."""
     if method == 'GET' and path == '/health':
         return Principal('anonymous')
+    if authorization.startswith('Bearer lc.'):
+        from pairing import integration_principal
+        return integration_principal(authorization, path, method)
     if authorization and hmac.compare_digest(authorization.encode(), operator_header.encode()):
         return Principal('operator')
     if (path.startswith('/api/') or path.startswith('/simulator/api/')) and not path.startswith('/api/shops'):
@@ -319,7 +324,7 @@ def authenticate(authorization, path, method, operator_header):
 def effective_shop(principal, requested=None):
     """The only place a request's shop is decided: a shop token is pinned to its
     own shop; operators (or the local runner) may select any shop via X-Lab-Shop."""
-    if principal.kind == 'shop':
+    if principal.kind in ('shop', 'integration'):
         if requested and requested != principal.shop_id:
             raise LabAuthError(403, 'This token cannot access another shop')
         return principal.shop_id
@@ -568,6 +573,12 @@ def handle_source_get(principal,x_shop,path,q):
     return source_get(effective_shop(principal,x_shop),path,q)
 
 def handle_source_post(principal,x_shop,path,req):
+    if path == '/api/pairing-codes':
+        import pairing
+        effective_shop(principal, x_shop)
+        if set(req) != {'intent'}:
+            raise LabAuthError(400, 'Expected a pairing intent only')
+        return pairing.issue(principal, req.get('intent'))
     if path=='/api/shops':
         require_operator(principal);return create_shop(req.get('name'))
     if path=='/api/shops/rotate-token':

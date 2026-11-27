@@ -47,7 +47,7 @@ class HostedHandler(lab.SourceHandler):
         cookie_principal = browser_auth.authenticate(self.headers.get('Cookie'))
         if browser_auth.COOKIE + '=' in self.headers.get('Cookie', ''):
             self.principal = cookie_principal
-        if path in ('/login', '/login.js', '/style.css', '/auth/login') and self.principal is None:
+        if path in ('/login', '/login.js', '/style.css', '/auth/login', '/service/pairing/exchange') and self.principal is None:
             self.principal = lab.Principal('anonymous')
         if self.command == 'POST':
             # Trust TLS forwarding only when explicitly configured by the operator.
@@ -133,6 +133,17 @@ class HostedHandler(lab.SourceHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == '/service/pairing/exchange':
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size <= 10000:
+                    raise ValueError()
+                import pairing
+                return self.send_json(200, pairing.exchange(self.rfile.read(size), self.headers.get('Authorization', '')))
+            except lab.LabAuthError as exc:
+                return self.send_json(exc.status, {'error': str(exc)})
+            except (ValueError, TypeError):
+                return self.send_json(400, {'error': 'Invalid pairing exchange'})
         if path in ('/auth/login', '/auth/logout'):
             try:
                 body = self.read_json()

@@ -77,6 +77,7 @@ def initialize():
         # database and an existing one take the same path.
         conn.execute((Path(__file__).with_name('serverless_schema.sql')).read_text(encoding='utf-8'))
         conn.execute((Path(__file__).with_name('serverless_migration_shops.sql')).read_text(encoding='utf-8'))
+        conn.execute((Path(__file__).with_name('serverless_migration_pairing.sql')).read_text(encoding='utf-8'))
         for row in lab.SEED_PRODUCTS:
             conn.execute('INSERT INTO idrak_lab_source.products(shop_id,sku,name_ar,name_en,emoji,price_mils,stock) '
                          'VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(shop_id,sku) DO NOTHING', (lab.LEGACY_SHOP, *row))

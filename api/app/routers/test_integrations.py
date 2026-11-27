@@ -63,6 +63,13 @@ class ConnectReadTests(unittest.TestCase):
             self.assertEqual(self.client.post("/integrations/connections/id/sync").status_code, 403)
         fetch.assert_not_awaited()
 
+    def test_cashier_cannot_issue_or_redeem_pairing(self):
+        from app.services.pos import pairing
+        with patch.object(pairing, 'exchange_remote', new=AsyncMock()) as exchange:
+            for path in ('/integrations/lab/pairing-intents', '/integrations/lab/pair'):
+                self.assertEqual(self.client.post(path, json={}).status_code, 403)
+        exchange.assert_not_awaited()
+
     def test_remote_lab_configuration_requires_staging(self):
         env = {"IDRAK_LAB_BASE_URL": "https://isolated-lab.example.test",
                "IDRAK_LAB_ACCESS_PASSWORD": "temporary-password"}

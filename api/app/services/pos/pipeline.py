@@ -68,6 +68,14 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
     if code in ("lab_pos", "lab_web"):
         cfg = connection.get("config") or {}
         from . import lab
+        if cfg.get('paired_lab'):
+            from .pairing import LAB_ORIGIN
+            credentials = connection.get('_lab_credentials')
+            if not credentials or credentials['org_id'] != str(org_id) or credentials['shop_id'] != connection['account_ref']:
+                raise ValueError('Paired Lab credentials unavailable')
+            return cls(base_url=LAB_ORIGIN, secret=credentials['webhook_secret'],
+                       account_ref=connection['account_ref'], authorization='Bearer ' + credentials['token'],
+                       branch=cfg.get('branch_name') or ('Lab ' + connection['account_ref']))
         # السرّ يُقرأ من البيئة (لا يُخزَّن في config/قاعدة): نفس سرّ المختبر المحلّي.
         secret = os.environ.get("IDRAK_LAB_WEBHOOK_SECRET") or lab.DEFAULT_SECRET
         authorization = None
@@ -81,6 +89,21 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
                    secret=secret, branch=cfg.get("branch_name") or lab.DEFAULT_BRANCH,
                    authorization=authorization)
     return cls()
+
+
+async def _adapter_for(connection, org_id):
+    if connection['provider_code'] in ('lab_pos', 'lab_web') and (connection.get('config') or {}).get('paired_lab'):
+        from .pairing import load_credentials
+        connection = {**connection, '_lab_credentials': await load_credentials(connection, org_id)}
+    return build_adapter(connection, org_id)
+
+
+async def _lock_paired_source(c, connection, org_id):
+    if (connection.get('config') or {}).get('paired_lab'):
+        # Both channels resolve shared organization products. Serialize them
+        # together, including two shops belonging to the same organization.
+        identity = f"lab-events:{org_id}"
+        await c.execute('SELECT pg_advisory_xact_lock(hashtext($1))', identity)
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +317,10 @@ async def _apply_inventory(c, org_id: str, connection_id: str, ev: "model.Event"
 # --------------------------------------------------------------------------
 async def _process_event(c, p: dict, ev: "model.Event", counts, job_id) -> None:
     org_id, connection_id = p["org_id"], p["connection_id"]
+    if p.get('paired_lab') and ev.type == model.EVENT_INVENTORY:
+        # POS/web inventory share the Lab's global source_sequence. One identity
+        # per shop/SKU prevents an older channel from overwriting newer stock.
+        p = {**p, 'provider_code': 'lab_inventory'}
     try:
         ev.validate()
     except model.InvalidEvent as exc:
@@ -347,6 +374,7 @@ def _proc_ctx(connection: dict, org_id: str) -> dict:
     cfg = connection.get("config") or {}
     return {"org_id": org_id, "connection_id": str(connection["id"]), "provider_code": provider_code,
             "account_ref": connection.get("account_ref") or "default",
+            "paired_lab": bool(cfg.get('paired_lab')),
             "channel": cfg.get("channel") or _default_channel(provider_code),
             "adjust_inv": bool(cfg.get("sales_adjust_inventory", True)),
             "caches": {"branch": {}, "emp": {}, "prod": {}}}
@@ -359,7 +387,7 @@ async def run_sync(org_id: str, user_id: str | None, connection: dict,
                    trigger: str = "manual", initial: bool = False) -> dict:
     connection_id = str(connection["id"])
     pctx = _proc_ctx(connection, org_id)
-    adp = build_adapter(connection, org_id)
+    adp = await _adapter_for(connection, org_id)
     ctx_cursor = connection.get("cursor") or {}
 
     import anyio
@@ -385,6 +413,7 @@ async def run_sync(org_id: str, user_id: str | None, connection: dict,
         org_id, connection_id, "initial" if initial else trigger, ctx_cursor)
 
     async with db.transaction() as c:
+        await _lock_paired_source(c, connection, org_id)
         for ev in events:
             await _process_event(c, pctx, ev, counts, job_id)
 
@@ -419,7 +448,7 @@ class WebhookRejected(Exception):
 
 async def run_webhook(org_id: str, user_id: str | None, connection: dict,
                       headers: dict, body: bytes) -> dict:
-    adp = build_adapter(connection, org_id)
+    adp = await _adapter_for(connection, org_id)
     verify = getattr(adp, "verify_webhook", None)
     if verify is None or not verify(headers, body):
         raise WebhookRejected("invalid webhook signature")
@@ -438,6 +467,12 @@ async def run_webhook(org_id: str, user_id: str | None, connection: dict,
         """insert into pos_sync_jobs(org_id,connection_id,trigger,status,cursor_before)
            values($1,$2,'webhook','running','{}'::jsonb) returning id""", org_id, connection_id)
     async with db.transaction() as c:
+        await _lock_paired_source(c, connection, org_id)
+        if event_id and (connection.get('config') or {}).get('paired_lab'):
+            seen = await c.fetchval('SELECT 1 FROM pos_webhook_deliveries WHERE connection_id=$1 AND event_id=$2', connection_id, event_id)
+            if seen:
+                await c.execute("UPDATE pos_sync_jobs SET status='success',counts=$2,finished_at=now() WHERE id=$1", job_id, {'imported': 0, 'updated': 0, 'skipped': 1, 'failed': 0})
+                return {'status': 'duplicate_skipped', 'event_id': event_id}
         if ev is not None:
             await _process_event(c, pctx, ev, counts, job_id)
         if event_id:
@@ -465,7 +500,7 @@ async def run_webhook(org_id: str, user_id: str | None, connection: dict,
 async def test_connection(connection: dict, org_id: str) -> dict:
     checks: list[dict] = []
     try:
-        adp = build_adapter(connection, org_id)
+        adp = await _adapter_for(connection, org_id)
     except ValueError as exc:
         return {"ok": False, "checks": [{"name": "adapter", "ok": False, "detail": str(exc)}]}
     caps = getattr(adp, "capabilities", None)
