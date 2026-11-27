@@ -9,6 +9,7 @@ from ..auth import Ctx, require
 from ..config import settings
 from ..services import email
 from ..services import insights as I
+from ..services import salesnet as N
 
 router = APIRouter(tags=["insights"])
 
@@ -161,8 +162,8 @@ async def goals(ctx: Ctx = Depends(require("view_dashboard"))):
     # b.org_id=g.org_id و s.org_id=g.org_id يمنعان قراءة اسم أو إيرادات فرع
     # لا ينتمي إلى مؤسسة المتصل، حتى لو كان صفّ هدف ملوّث قد خُزّن سابقاً
     # (انظر add_goal أدناه).
-    return await db.fetch("""select g.id, g.branch_id, b.name branch, b.name_ar branch_ar, g.metric, g.period_month, g.target,
-        (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
+    return await db.fetch(f"""select g.id, g.branch_id, b.name branch, b.name_ar branch_ar, g.metric, g.period_month, g.target,
+        (select coalesce(sum(s.total*{N.SIGN}),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and {N.COUNTED}
            and date_trunc('month', amman_date(s.sold_at)) = g.period_month and amman_date(s.sold_at) <= $2) actual
         from goals g left join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 order by g.period_month desc, b.name""", ctx.org_id, end)
 
@@ -193,15 +194,16 @@ async def _evaluate(org_id: str, rule: dict) -> dict:
     if m == "stock_below_reorder":
         val = await db.fetchval("select count(*) from inventory_levels il join products p on p.id=il.product_id where il.org_id=$1 and il.quantity <= p.reorder_level", org_id)
     elif m == "daily_sales_drop_pct":
-        r = await db.fetchrow("""select sum(total) filter (where amman_date(sold_at)=$2) y, sum(total) filter (where amman_date(sold_at) between $2::date - 28 and $2::date - 1)/28.0 avg
-            from sales where org_id=$1 and status='completed' and amman_date(sold_at) >= $2::date - 28""", org_id, end)
+        r = await db.fetchrow(f"""select sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at)=$2) y,
+            sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) between $2::date - 28 and $2::date - 1)/28.0 avg
+            from sales s where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) >= $2::date - 28""", org_id, end)
         val = round(100 * (r["avg"] - (r["y"] or 0)) / r["avg"], 1) if r["avg"] else 0
     elif m == "discount_rate_pct":
         val = await db.fetchval("""select round(sum(discount)/nullif(sum(subtotal),0)*100, 2) from sales where org_id=$1 and status='completed' and amman_date(sold_at) > $2::date - 7""", org_id, end) or 0
     elif m == "expiring_items":
         val = await db.fetchval("select count(*) from inventory_batches where org_id=$1 and quantity>0 and expiry_date <= $2::date + 7", org_id, end)
     elif m == "revenue_below":
-        val = await db.fetchval("select coalesce(sum(total),0) from sales where org_id=$1 and status='completed' and amman_date(sold_at)=$2", org_id, end)
+        val = await db.fetchval(f"select coalesce(sum(s.total*{N.SIGN}),0) from sales s where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at)=$2", org_id, end)
     thr = rule["threshold"]
     trig = val is not None and ((val > thr) if rule["operator"] == ">" else (val < thr))
     return {**rule, "current": val, "triggered": trig}

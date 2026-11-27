@@ -7,6 +7,7 @@ import statistics
 from collections import defaultdict
 
 from .. import db
+from . import salesnet as N
 
 RAMADAN = [(dt.date(2025, 3, 1), dt.date(2025, 3, 29)), (dt.date(2026, 2, 18), dt.date(2026, 3, 19)), (dt.date(2027, 2, 8), dt.date(2027, 3, 9)),
            (dt.date(2028, 1, 28), dt.date(2028, 2, 26))]
@@ -62,61 +63,69 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
 
     async def kpis(a, b):
         r = await db.fetchrow(f"""
-            with s as (select * from sales s where s.org_id=$1 and amman_date(s.sold_at) between $2 and $3 {bf})
-            select (select coalesce(sum(total),0) from s where status='completed') revenue,
+            with s as (select s.*, {N.SIGN} sg, {N.LAB_FLIP} lab_flip
+                       from sales s where s.org_id=$1 and amman_date(s.sold_at) between $2 and $3 {bf})
+            select (select coalesce(sum(total),0) from s where status='completed' or lab_flip) gross_sales,
+                   (select coalesce(sum(total),0) from s where status='returned') returns_value,
+                   (select coalesce(sum(total*sg),0) from s) revenue,
                    (select count(*) from s where status='completed') tx,
                    (select coalesce(sum(discount),0) from s where status='completed') discounts,
                    (select count(*) from s where status='void') voids,
                    (select count(*) from s where status='returned') returns,
-                   (select coalesce(sum(total),0) from s where status='returned') returns_value,
                    (select count(distinct customer_id) from s where status='completed') customers,
-                   (select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si join s on s.id=si.sale_id where s.status='completed') profit,
-                   (select coalesce(sum(si.quantity),0) from sale_items si join s on s.id=si.sale_id where s.status='completed') units
+                   (select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si join s on s.id=si.sale_id where s.status='completed' or s.lab_flip) gross_profit,
+                   (select coalesce(sum((si.line_total - si.unit_cost*si.quantity)*s.sg),0) from sale_items si join s on s.id=si.sale_id) profit,
+                   (select coalesce(sum(si.quantity*s.sg),0) from sale_items si join s on s.id=si.sale_id) units
         """, org_id, a, b, *bargs)
-        r["basket"] = r["revenue"] / r["tx"] if r["tx"] else 0
+        # revenue = NET sales (after returns); basket = average ticket of completed sales.
+        r["net_sales"] = r["revenue"]
+        r["returns_profit"] = r["gross_profit"] - r["profit"]
+        r["basket"] = r["gross_sales"] / r["tx"] if r["tx"] else 0
         r["margin"] = 100 * r["profit"] / r["revenue"] if r["revenue"] else 0
+        r["gross_margin_before_returns"] = 100 * r["gross_profit"] / r["gross_sales"] if r["gross_sales"] else 0
         r["units_per_tx"] = r["units"] / r["tx"] if r["tx"] else 0
         return r
 
 
     q_series = db.fetch(f"""
-        select amman_date(s.sold_at) d, sum(s.total) revenue, count(*) tx,
-               sum((select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si where si.sale_id=s.id)) profit
-        from sales s where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf}
+        select amman_date(s.sold_at) d, sum(s.total*{N.SIGN}) revenue, count(*) filter (where s.status='completed') tx,
+               sum({N.SIGN}*(select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si where si.sale_id=s.id)) profit
+        from sales s where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {bf}
         group by 1 order by 1""", org_id, start, end, *bargs)
     q_top = db.fetch(f"""
-        select p.id, p.name, p.name_ar, sum(si.quantity) qty, sum(si.line_total) revenue, sum(si.line_total - si.unit_cost*si.quantity) profit
+        select p.id, p.name, p.name_ar, sum(si.quantity*{N.SIGN}) qty, sum(si.line_total*{N.SIGN}) revenue,
+               sum((si.line_total - si.unit_cost*si.quantity)*{N.SIGN}) profit
         from sale_items si join sales s on s.id=si.sale_id join products p on p.id=si.product_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf}
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {bf}
         group by 1,2,3 order by revenue desc limit 10""", org_id, start, end, *bargs)
     q_cats = db.fetch(f"""
-        select c.name, c.name_ar, sum(si.line_total) revenue, sum(si.line_total - si.unit_cost*si.quantity) profit
+        select c.name, c.name_ar, sum(si.line_total*{N.SIGN}) revenue, sum((si.line_total - si.unit_cost*si.quantity)*{N.SIGN}) profit
         from sale_items si join sales s on s.id=si.sale_id join products p on p.id=si.product_id join categories c on c.id=p.category_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf}
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {bf}
         group by 1,2 order by revenue desc""", org_id, start, end, *bargs)
     q_heat = db.fetch(f"""
         select extract(isodow from s.sold_at at time zone 'Asia/Amman')::int dow, extract(hour from s.sold_at at time zone 'Asia/Amman')::int h, count(*) n
         from sales s where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf} group by 1,2""", org_id, start, end, *bargs)
-    q_pay = db.fetch(f"""select payment_method m, count(*) n, sum(total) revenue from sales s where s.org_id=$1 and s.status='completed'
-        and amman_date(s.sold_at) between $2 and $3 {bf} group by 1 order by 2 desc""", org_id, start, end, *bargs)
+    q_pay = db.fetch(f"""select payment_method m, count(*) filter (where s.status='completed') n, sum(total*{N.SIGN}) revenue from sales s
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {bf} group by 1 order by 2 desc""", org_id, start, end, *bargs)
     # توحيد القنوات: كل فاتورة مكتملة في قناة واحدة، فمجموع القنوات = الإجمالي (بلا ازدواج).
     # القيم: in_store (كاشير)، online (متجر)، other (مصدر آخر)، direct (إدخال/استيراد مباشر).
-    q_channels = db.fetch(f"""select coalesce(s.channel,'direct') channel, count(*) tx, sum(s.total) revenue,
-            sum((select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si where si.sale_id=s.id)) profit
-        from sales s where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {bf}
+    q_channels = db.fetch(f"""select coalesce(s.channel,'direct') channel, count(*) filter (where s.status='completed') tx, sum(s.total*{N.SIGN}) revenue,
+            sum({N.SIGN}*(select coalesce(sum(si.line_total - si.unit_cost*si.quantity),0) from sale_items si where si.sale_id=s.id)) profit
+        from sales s where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {bf}
         group by 1 order by revenue desc""", org_id, start, end, *bargs)
-    q_branches = db.fetch("""
+    q_branches = db.fetch(f"""
         select b.id, b.name, b.name_ar,
-          coalesce(sum(s.total) filter (where amman_date(s.sold_at) between $2 and $3),0) revenue,
-          count(*) filter (where amman_date(s.sold_at) between $2 and $3) tx,
-          coalesce(sum(s.total) filter (where amman_date(s.sold_at) between $4 and $5),0) prev_revenue
-        from branches b left join sales s on s.branch_id=b.id and s.status='completed' and amman_date(s.sold_at) between $4 and $3
+          coalesce(sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) between $2 and $3),0) revenue,
+          count(*) filter (where s.status='completed' and amman_date(s.sold_at) between $2 and $3) tx,
+          coalesce(sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) between $4 and $5),0) prev_revenue
+        from branches b left join sales s on s.branch_id=b.id and {N.COUNTED} and amman_date(s.sold_at) between $4 and $3
         where b.org_id=$1 group by 1,2,3 order by revenue desc""", org_id, start, end, pstart, pend)
     month = end.replace(day=1)
     month = end.replace(day=1)
-    q_goals = db.fetch("""
+    q_goals = db.fetch(f"""
         select g.branch_id, b.name, b.name_ar, g.target,
-          (select coalesce(sum(total),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and s.status='completed'
+          (select coalesce(sum(s.total*{N.SIGN}),0) from sales s where s.branch_id=g.branch_id and s.org_id=g.org_id and {N.COUNTED}
              and amman_date(s.sold_at) between $2 and $3) actual
         from goals g join branches b on b.id=g.branch_id and b.org_id=g.org_id where g.org_id=$1 and g.period_month=$2""", org_id, month, end)
     cur, prev, series, top, cats, heat, pay, branches, goals, channels = await asyncio.gather(
@@ -134,7 +143,7 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
     return {
         "range": {"start": start.isoformat(), "end": end.isoformat(), "days": days},
         "kpis": {k: _r(v) for k, v in cur.items()},
-        "deltas": {k: delta(k) for k in ("revenue", "profit", "tx", "basket", "margin", "customers", "discounts")},
+        "deltas": {k: delta(k) for k in ("revenue", "profit", "tx", "basket", "margin", "customers", "discounts", "gross_sales", "returns_value")},
         "series": series, "top_products": top, "categories": cats, "heatmap": heat, "payments": pay,
         "branches": branches, "goals": goals, "channels": channels,
     }
@@ -151,10 +160,10 @@ async def leaks(org_id: str) -> list[dict]:
     # 2. قيمة المخزون > 5 د.أ — نتجاهل الأصناف الرخيصة جداً.
     # 3. مبيعات آخر 60 يوماً ≤ 5% من الرصيد أو ≤ 3 قطع. الشرط الثاني
     #    يمسك المنتج بالرصيد الضخم الذي باع صفراً حتى لو 5% = 50 قطعة.
-    dead = await db.fetch("""
+    dead = await db.fetch(f"""
         select p.id, p.name, p.name_ar, sum(il.quantity) stock, sum(il.quantity*p.cost) value,
-          coalesce((select sum(si.quantity) from sale_items si join sales s on s.id=si.sale_id
-                    where si.product_id=p.id and s.status='completed' and amman_date(s.sold_at) > $2::date - 60),0) sold60
+          coalesce((select sum(si.quantity*{N.SIGN}) from sale_items si join sales s on s.id=si.sale_id
+                    where si.product_id=p.id and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 60),0) sold60
         from inventory_levels il join products p on p.id=il.product_id
         where il.org_id=$1 and il.quantity > 0 and p.created_at < now() - interval '60 days'
         group by 1,2,3 having sum(il.quantity*p.cost) > 5""", org_id, end)
@@ -212,11 +221,11 @@ async def leaks(org_id: str) -> list[dict]:
                                     [{"employee_id": x["id"], "name": x["full_name"], "discount_rate": round(rate * 100, 2), "peer_rate": round(med * 100, 2),
                                       "voids": x["voids"], "void_rate": round(vr * 100, 2), "excess_90d": _r(excess)}]))
 
-    shr = await db.fetch("""
+    shr = await db.fetch(f"""
         with recv as (select pu.branch_id, pi.product_id, sum(pi.quantity) q from purchase_items pi join purchases pu on pu.id=pi.purchase_id
                       where pu.org_id=$1 and pu.status='received' group by 1,2),
-             sold as (select s.branch_id, si.product_id, sum(si.quantity) q from sale_items si join sales s on s.id=si.sale_id
-                      where s.org_id=$1 and s.status='completed' group by 1,2)
+             sold as (select s.branch_id, si.product_id, sum(si.quantity*{N.SIGN}) q from sale_items si join sales s on s.id=si.sale_id
+                      where s.org_id=$1 and {N.COUNTED} group by 1,2)
         select b.id branch_id, b.name branch, b.name_ar branch_ar, p.name, p.name_ar, c.name category, c.name_ar category_ar,
                (r.q - coalesce(sd.q,0)) expected, il.quantity actual, ((r.q - coalesce(sd.q,0)) - il.quantity) * p.cost loss
         from recv r join inventory_levels il on il.branch_id=r.branch_id and il.product_id=r.product_id
@@ -277,9 +286,9 @@ async def leaks(org_id: str) -> list[dict]:
                             "قارن مع موزع ثاني أو فاوض على خصم كمية قبل الطلبية الجاية.",
                             f"/app/suppliers?highlight={s['id']}", [{"supplier_id": s["id"], "name": s["name"], "pct": _r(s["pct"], 1), "extra_45d": _r(s["extra"])}]))
 
-    so = await db.fetch("""
-        with v as (select si.product_id, s.branch_id, sum(si.line_total)/28.0 daily from sale_items si join sales s on s.id=si.sale_id
-                   where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 28 group by 1,2)
+    so = await db.fetch(f"""
+        with v as (select si.product_id, s.branch_id, sum(si.line_total*{N.SIGN})/28.0 daily from sale_items si join sales s on s.id=si.sale_id
+                   where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 28 group by 1,2)
         select p.id, p.name, p.name_ar, b.name branch, v.daily, il.quantity from v join inventory_levels il on il.product_id=v.product_id and il.branch_id=v.branch_id
         join products p on p.id=v.product_id join branches b on b.id=v.branch_id where il.quantity <= 0 and v.daily > 1.5 order by v.daily desc""", org_id, end)
     if so:
@@ -313,9 +322,9 @@ async def forecast(org_id: str, product_id: str | None = None, category_id: str 
         where += f" and s.branch_id = ${len(args) + 1}"
         args.append(branch_id)
     rows = await db.fetch(f"""
-        select amman_date(s.sold_at) d, sum(si.quantity) q, sum(si.line_total) rev
+        select amman_date(s.sold_at) d, sum(si.quantity*{N.SIGN}) q, sum(si.line_total*{N.SIGN}) rev
         from sale_items si join sales s on s.id=si.sale_id join products p on p.id=si.product_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between $2 and $3 {where} group by 1 order by 1""", *args)
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between $2 and $3 {where} group by 1 order by 1""", *args)
     hist = {dt.date.fromisoformat(r["d"]): (r["q"], r["rev"]) for r in rows}
     first = min(hist) if hist else end
     days = [first + dt.timedelta(days=i) for i in range((end - first).days + 1)]
@@ -361,11 +370,11 @@ async def forecast(org_id: str, product_id: str | None = None, category_id: str 
 
 @db.cached(900)
 async def ramadan_movers(org_id: str) -> list[dict]:
-    rows = await db.fetch("""
-        with r as (select si.product_id, sum(si.quantity)/30.0 q from sale_items si join sales s on s.id=si.sale_id
-                   where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between '2026-02-18' and '2026-03-19' group by 1),
-             b as (select si.product_id, sum(si.quantity)/60.0 q from sale_items si join sales s on s.id=si.sale_id
-                   where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) between '2025-12-19' and '2026-02-17' group by 1)
+    rows = await db.fetch(f"""
+        with r as (select si.product_id, sum(si.quantity*{N.SIGN})/30.0 q from sale_items si join sales s on s.id=si.sale_id
+                   where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between '2026-02-18' and '2026-03-19' group by 1),
+             b as (select si.product_id, sum(si.quantity*{N.SIGN})/60.0 q from sale_items si join sales s on s.id=si.sale_id
+                   where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) between '2025-12-19' and '2026-02-17' group by 1)
         select p.id, p.name, p.name_ar, r.q ram_daily, b.q base_daily, r.q/nullif(b.q,0) uplift
         from r join b on b.product_id=r.product_id join products p on p.id=r.product_id
         where b.q > 0.05 order by uplift desc limit 12""", org_id)
@@ -378,8 +387,8 @@ async def reorder(org_id: str, cover_days: int = 14, branch_id: str | None = Non
     bf = " and il.branch_id = $3" if branch_id else ""
     args = [org_id, end] + ([branch_id] if branch_id else [])
     rows = await db.fetch(f"""
-        with v as (select si.product_id, s.branch_id, sum(si.quantity)/28.0 daily from sale_items si join sales s on s.id=si.sale_id
-                   where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 28 group by 1,2),
+        with v as (select si.product_id, s.branch_id, sum(si.quantity*{N.SIGN})/28.0 daily from sale_items si join sales s on s.id=si.sale_id
+                   where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 28 group by 1,2),
              onorder as (select pu.branch_id, pi.product_id, sum(pi.quantity) q from purchase_items pi join purchases pu on pu.id=pi.purchase_id
                    where pu.org_id=$1 and pu.status in ('sent','draft') group by 1,2)
         select p.id product_id, p.name, p.name_ar, p.cost, p.price, p.reorder_level, b.id branch_id, b.name branch, b.name_ar branch_ar,
@@ -554,9 +563,10 @@ async def simulate(org_id: str, product_ids: list[str] | None, category_id: str 
     elif category_id:
         where = " and p.category_id = $3"
         args.append(category_id)
-    r = await db.fetchrow(f"""select coalesce(sum(si.quantity),0) q, coalesce(sum(si.line_total),0) rev, coalesce(sum(si.unit_cost*si.quantity),0) cost
+    r = await db.fetchrow(f"""select coalesce(sum(si.quantity*{N.SIGN}),0) q, coalesce(sum(si.line_total*{N.SIGN}),0) rev,
+        coalesce(sum(si.unit_cost*si.quantity*{N.SIGN}),0) cost
         from sale_items si join sales s on s.id=si.sale_id join products p on p.id=si.product_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 30 {where}""", *args)
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 30 {where}""", *args)
     q0, rev0, cost0 = r["q"], r["rev"], r["cost"]
     eff_price = (1 + price_pct / 100) * (1 - discount_pct / 100)
     q1 = q0 * (eff_price ** elasticity) if q0 else 0
@@ -574,11 +584,11 @@ async def cashflow(org_id: str, weeks: int = 8, opening: float | None = None) ->
     end = await data_end(org_id)
     org = await db.fetchrow("select monthly_rent, opening_cash from organizations where id=$1", org_id)
     nb = await db.fetchval("select count(*) from branches where org_id=$1", org_id)
-    weekly = await db.fetch("""select date_trunc('week', amman_date(sold_at))::date w, sum(total) rev from sales
-        where org_id=$1 and status='completed' and amman_date(sold_at) > $2::date - 56 group by 1 order by 1""", org_id, end)
+    weekly = await db.fetch(f"""select date_trunc('week', amman_date(s.sold_at))::date w, sum(s.total*{N.SIGN}) rev from sales s
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 56 group by 1 order by 1""", org_id, end)
     avg_week = statistics.mean([w["rev"] for w in weekly[1:-1]]) if len(weekly) > 3 else (weekly[0]["rev"] if weekly else 0)
-    cogs_ratio = await db.fetchval("""select sum(si.unit_cost*si.quantity)/nullif(sum(si.line_total),0) from sale_items si join sales s on s.id=si.sale_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 56""", org_id, end) or 0.75
+    cogs_ratio = await db.fetchval(f"""select sum(si.unit_cost*si.quantity*{N.SIGN})/nullif(sum(si.line_total*{N.SIGN}),0) from sale_items si join sales s on s.id=si.sale_id
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 56""", org_id, end) or 0.75
     payroll = await db.fetchval("select coalesce(sum(monthly_salary),0) from employees where org_id=$1 and is_active", org_id)
     dues = await db.fetch("""select pu.received_at::date + su.payment_terms_days due, sum(pu.total) amt from purchases pu join suppliers su on su.id=pu.supplier_id
         where pu.org_id=$1 and pu.status='received' and pu.received_at::date + su.payment_terms_days > $2 group by 1""", org_id, end)

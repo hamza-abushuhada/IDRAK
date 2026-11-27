@@ -111,11 +111,18 @@ function DashboardScreen() {
         <>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
             {!k ? Array.from({ length: 5 }).map((_, i) => <StatSkeleton key={i} />) : (<>
-              <Stat id="kpi-revenue" tone="terra" label={tx("Revenue", "المبيعات")} value={<Money v={k.revenue} compact />} delta={d.deltas.revenue} hint={vsLabel} />
-              <Stat id="kpi-profit" tone="olive" label={tx("Gross profit", "الربح الإجمالي")} value={<Money v={k.profit} compact />} delta={d.deltas.profit} hint={vsLabel} />
+              <Stat id="kpi-revenue" tone="terra" label={tx("Net sales", "صافي المبيعات")} value={<Money v={k.revenue} compact />} delta={d.deltas.revenue}
+                hint={k.returns_value
+                  ? tx(`Gross ${jd(k.gross_sales ?? k.revenue, locale)} − returns ${jd(k.returns_value, locale)}`,
+                       `الإجمالي ${jd(k.gross_sales ?? k.revenue, locale)} − مرتجعات ${jd(k.returns_value, locale)}`)
+                  : vsLabel} />
+              <Stat id="kpi-profit" tone="olive" label={tx("Gross profit (net of returns)", "الربح الإجمالي (بعد المرتجعات)")} value={<Money v={k.profit} compact />} delta={d.deltas.profit}
+                hint={k.returns_value
+                  ? tx(`Before returns ${jd(k.gross_profit ?? k.profit, locale)}`, `قبل المرتجعات ${jd(k.gross_profit ?? k.profit, locale)}`)
+                  : vsLabel} />
               <Stat id="kpi-basket" label={tx("Average basket", "متوسط السلة")} value={<Money v={k.basket} decimals={3} />} delta={d.deltas.basket}
                 hint={tx(`${num(k.units_per_tx, 1)} items per receipt`, `${num(k.units_per_tx, 1)} قطعة بالفاتورة`)} />
-              <Stat id="kpi-margin" label={tx("Gross margin", "هامش الربح")} value={<span className="num">{pct(k.margin)}</span>} delta={d.deltas.margin}
+              <Stat id="kpi-margin" label={tx("Margin (net)", "هامش الربح الصافي")} value={<span className="num">{pct(k.margin)}</span>} delta={d.deltas.margin}
                 hint={k.returns
                   ? tx(`Discounts ${jd(k.discounts, locale)} · returns ${jd(k.returns_value ?? 0, locale)}`,
                        `خصومات ${jd(k.discounts, locale)} · مرتجعات ${jd(k.returns_value ?? 0, locale)}`)

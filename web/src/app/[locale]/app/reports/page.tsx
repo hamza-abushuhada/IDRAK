@@ -81,7 +81,7 @@ function Sheet({ s }: { s: Summary }) {
   const best = d.branches[0];
   const monthlyLeak = s.leaks.filter((l) => !["dead_stock", "expiring"].includes(l.kind)).reduce((a, l) => a + (l.amount_jod || 0), 0);
   const kpis: { label: string; v: React.ReactNode; dl?: number | null }[] = [
-    { label: tx("Revenue", "المبيعات"), v: <Money v={k.revenue} decimals={0} />, dl: d.deltas.revenue },
+    { label: tx("Net sales", "صافي المبيعات"), v: <Money v={k.revenue} decimals={0} />, dl: d.deltas.revenue },
     { label: tx("Gross profit", "الربح الإجمالي"), v: <Money v={k.profit} decimals={0} />, dl: d.deltas.profit },
     { label: tx("Margin", "الهامش"), v: <span className="num">{pct(k.margin)}</span>, dl: d.deltas.margin },
     { label: tx("Avg basket", "متوسط السلة"), v: <Money v={k.basket} decimals={3} />, dl: d.deltas.basket },
@@ -105,7 +105,7 @@ function Sheet({ s }: { s: Summary }) {
 
       <section className="report-block mt-6">
         <p className="max-w-3xl text-[15px] leading-relaxed text-ink">
-          {tx(`Revenue was ${jd(k.revenue, locale, { decimals: 0 })}`, `المبيعات كانت ${jd(k.revenue, locale, { decimals: 0 })}`)}
+          {tx(`Net sales were ${jd(k.revenue, locale, { decimals: 0 })}`, `صافي المبيعات كان ${jd(k.revenue, locale, { decimals: 0 })}`)}
           {d.deltas.revenue !== null && d.deltas.revenue !== undefined && tx(` (${d.deltas.revenue >= 0 ? "up" : "down"} ${num(Math.abs(d.deltas.revenue), 1)}% on the previous ${s.period_days} days)`,
             ` (${d.deltas.revenue >= 0 ? "أعلى" : "أقل"} بـ ${num(Math.abs(d.deltas.revenue), 1)}% من الـ ${s.period_days} يوم اللي قبل)`)}
           {tx(` with a gross profit of ${jd(k.profit, locale, { decimals: 0 })}.`, ` بربح إجمالي ${jd(k.profit, locale, { decimals: 0 })}.`)}
