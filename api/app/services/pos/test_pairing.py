@@ -201,3 +201,62 @@ class LegacyLabUrlGuardTests(unittest.IsolatedAsyncioTestCase):
             r = await pipeline.test_connection({**conn, 'status': 'connected'}, str(uuid4()))
             self.assertFalse(r['ok']); self.assertIn('not allowed', r['checks'][0]['detail'])
             urlopen.assert_not_called()
+
+
+class RedirectAuthorizationTests(unittest.IsolatedAsyncioTestCase):
+    """Redirect flow: state bound into the signed request; fragments only; server re-checks."""
+    def setUp(self):
+        self.env = patch.dict(os.environ, {'IDRAK_LAB_PAIRING_KEY': 'unit-test-pairing-only-' + 'a' * 40,
+                                          'IDRAK_CONNECT_ENCRYPTION_KEY': Fernet.generate_key().decode()})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.org, self.user = str(uuid4()), str(uuid4())
+
+    def decode(self, intent):
+        import base64
+        return json.loads(base64.urlsafe_b64decode(intent.split('.')[0]))
+
+    def test_authorize_url_carries_request_only_in_fragment(self):
+        from urllib.parse import parse_qs, urlsplit
+        r = pairing.new_authorization(self.org, self.user, 'ar', 'مؤسسة\u200f  الاختبار\n')
+        url = urlsplit(r['authorize_url'])
+        self.assertEqual((url.scheme + '://' + url.netloc, url.path, url.query), (pairing.LAB_ORIGIN, '/connect', ''))
+        frag = {k: v[0] for k, v in parse_qs(url.fragment).items()}
+        self.assertEqual(frag, {'request': r['intent'], 'state': r['state']})
+        data = self.decode(r['intent'])
+        self.assertEqual((data['flow'], data['lang'], data['org'], data['user']), ('redirect', 'ar', self.org, self.user))
+        self.assertEqual(data['name'], 'مؤسسة الاختبار')
+        self.assertNotIn(r['state'], r['intent'], 'only a hash of the state is signed into the request')
+        self.assertLessEqual(data['exp'], pairing.time.time() + pairing.REDIRECT_TTL + 1)
+        self.assertEqual(self.decode(pairing.new_authorization(self.org, self.user, 'xx')['intent'])['lang'], 'ar')
+
+    def test_state_is_required_and_must_match(self):
+        r = pairing.new_authorization(self.org, self.user, 'en')
+        pairing.validate_intent(r['intent'], self.org, self.user, r['state'])
+        other = pairing.new_authorization(self.org, self.user, 'en')
+        for state in (None, other['state'], r['state'][:-1] + ('A' if r['state'][-1] != 'A' else 'B'), '', 'x' * 43):
+            with self.assertRaises(HTTPException):
+                pairing.validate_intent(r['intent'], self.org, self.user, state)
+        for org, user in ((str(uuid4()), self.user), (self.org, str(uuid4()))):
+            with self.assertRaises(HTTPException):
+                pairing.validate_intent(r['intent'], org, user, r['state'])
+        manual = pairing.new_intent(self.org, self.user)['intent']
+        pairing.validate_intent(manual, self.org, self.user)
+        with self.assertRaises(HTTPException):
+            pairing.validate_intent(manual, self.org, self.user, r['state'])  # manual requests never take a state
+        with patch.object(pairing.time, 'time', return_value=pairing.time.time() + pairing.REDIRECT_TTL + 10):
+            with self.assertRaises(HTTPException):
+                pairing.validate_intent(r['intent'], self.org, self.user, r['state'])
+
+    async def test_redeem_checks_state_before_contacting_the_lab(self):
+        ctx = Mock(org_id=self.org, user=Mock(id=self.user))
+        r = pairing.new_authorization(self.org, self.user, 'ar')
+        with patch.object(pairing, 'exchange_remote', new=AsyncMock()) as exchange:
+            with self.assertRaises(HTTPException):
+                await pairing.redeem('c' * 43, r['intent'], ctx, 'z' * 43)
+        exchange.assert_not_awaited()
+
+    def test_names_are_cleaned(self):
+        self.assertEqual(pairing.clean_name('  محل\x00 الاختبار\t ج  ', 60), 'محل الاختبار ج')
+        self.assertEqual(pairing.clean_name(None), '')
+        self.assertEqual(len(pairing.clean_name('x' * 500, 60)), 60)

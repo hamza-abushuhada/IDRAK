@@ -1,0 +1,19 @@
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>ربط المحل مع إدراك — IDRAK Lab POS</title><link rel="stylesheet" href="/style.css"></head><body><main class="wrap auth-wrap connect-wrap">
+<section class="hero"><span class="eyebrow" id="eyebrow">طلب ربط من إدراك</span><h1 id="title">ربط محلك مع إدراك</h1><p id="intro">جارٍ التحقق من طلب الربط…</p></section>
+<section id="problem" class="card pad" hidden><h2 id="problem-title"></h2><p id="problem-text" class="muted"></p><a id="problem-link" class="btn secondary" hidden></a></section>
+<form id="consent" class="card pad" hidden novalidate>
+  <p class="connect-business"><strong id="business"></strong> <span id="business-asks"></span></p>
+  <fieldset class="connect-shops"><legend id="shops-legend">اختر المحل الذي تريد ربطه</legend><div id="shops"></div></fieldset>
+  <h2 id="scope-title" class="connect-scope-title">ما الذي سيصل إليه إدراك؟</h2>
+  <ul class="connect-scope">
+    <li class="yes" id="scope-pos">قراءة فواتير المبيعات من الكاشير</li>
+    <li class="yes" id="scope-web">قراءة طلبات المتجر الإلكتروني للمحل نفسه</li>
+    <li class="no" id="scope-no-edit">لا يستطيع إدراك تعديل المبيعات أو الأسعار أو المخزون</li>
+    <li class="no" id="scope-no-password">لن يحصل إدراك على كلمة مرورك أو حسابات موظفيك</li>
+  </ul>
+  <p class="muted" id="revoke-note">يمكنك إلغاء الربط في أي وقت من صفحة IDRAK Connect في إدراك.</p>
+  <div class="connect-actions"><button class="btn" type="submit" id="allow" disabled>السماح بالربط</button><button class="btn secondary" type="button" id="deny">رفض</button></div>
+  <p id="error" role="alert" class="auth-error"></p>
+  <p class="muted connect-who"><span id="who"></span> · <button type="button" class="linkish" id="switch">لست أنت؟ تسجيل الخروج</button> · <span id="expiry" role="timer"></span></p>
+</form>
+</main><script src="/connect.js"></script></body></html>

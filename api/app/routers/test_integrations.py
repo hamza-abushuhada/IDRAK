@@ -66,7 +66,7 @@ class ConnectReadTests(unittest.TestCase):
     def test_cashier_cannot_issue_or_redeem_pairing(self):
         from app.services.pos import pairing
         with patch.object(pairing, 'exchange_remote', new=AsyncMock()) as exchange:
-            for path in ('/integrations/lab/pairing-intents', '/integrations/lab/pair'):
+            for path in ('/integrations/lab/pairing-intents', '/integrations/lab/pair', '/integrations/lab/authorize'):
                 self.assertEqual(self.client.post(path, json={}).status_code, 403)
         exchange.assert_not_awaited()
 
@@ -98,6 +98,23 @@ class ConnectGuardTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.pool_patch.stop()
         app.middleware_stack = None
+
+    def test_lab_authorize_returns_fragment_only_url_and_pair_accepts_state(self):
+        from cryptography.fernet import Fernet
+        from app.services.pos import pairing
+        keys = {'IDRAK_LAB_PAIRING_KEY': 'unit-test-pairing-only-' + 'a' * 40, 'IDRAK_CONNECT_ENCRYPTION_KEY': Fernet.generate_key().decode()}
+        with patch.dict(os.environ, keys), patch.object(db, "fetchrow", new=AsyncMock(return_value={"name": "Org", "name_ar": "مؤسسة"})):
+            r = self.client.post("/integrations/lab/authorize", json={"locale": "ar"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["cache-control"], "no-store")
+        body = r.json()
+        self.assertTrue(body["authorize_url"].startswith(pairing.LAB_ORIGIN + "/connect#request="))
+        self.assertEqual(set(body), {"authorize_url", "intent", "state", "expires_at"})
+        with patch.object(pairing, "redeem", new=AsyncMock(return_value={"shop_id": "s", "name": "", "connections": []})) as redeem:
+            ok = self.client.post("/integrations/lab/pair", json={"code": "c" * 43, "intent": "i", "state": "s" * 43})
+            bad = self.client.post("/integrations/lab/pair", json={"code": "c" * 43, "intent": "i", "state": "s", "shop_id": "x"})
+        self.assertEqual((ok.status_code, bad.status_code), (200, 400))
+        self.assertEqual(redeem.await_args.args[3], "s" * 43)
 
     def test_test_connection_refuses_disconnected(self):
         from app.services.pos import pipeline

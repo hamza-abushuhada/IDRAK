@@ -25,6 +25,19 @@ async def lab_pairing_intent(ctx: Ctx = Depends(require("manage_integrations")))
     return JSONResponse(pairing.new_intent(ctx.org_id, ctx.user.id), headers={'Cache-Control': 'no-store'})
 
 
+class AuthorizeIn(BaseModel):
+    locale: str = "ar"
+
+
+@router.post('/lab/authorize')
+async def lab_authorize(body: AuthorizeIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    """Start linking a Lab shop by redirect (the owner signs in to the Lab and approves)."""
+    org = await db.fetchrow("select name, name_ar from organizations where id=$1", ctx.org_id)
+    name = (org["name_ar"] if body.locale == "ar" and org["name_ar"] else org["name"]) if org else ""
+    return JSONResponse(pairing.new_authorization(ctx.org_id, ctx.user.id, body.locale, name or ""),
+                        headers={'Cache-Control': 'no-store'})
+
+
 @router.post('/lab/pair')
 async def pair_lab(request: Request, ctx: Ctx = Depends(require("manage_integrations"))):
     import json
@@ -35,13 +48,14 @@ async def pair_lab(request: Request, ctx: Ctx = Depends(require("manage_integrat
             raise HTTPException(413, 'Pairing request too large')
     try:
         value = json.loads(raw)
-        if not isinstance(value, dict) or set(value) != {'code', 'intent'}:
+        if not isinstance(value, dict) or set(value) not in ({'code', 'intent'}, {'code', 'intent', 'state'}):
             raise ValueError()
         if not isinstance(value['code'], str) or not 20 <= len(value['code']) <= 128:
             raise ValueError()
     except (ValueError, TypeError):
         raise HTTPException(400, 'Expected a pairing code and intent only') from None
-    return JSONResponse(await pairing.redeem(value['code'], value['intent'], ctx), headers={'Cache-Control': 'no-store'})
+    return JSONResponse(await pairing.redeem(value['code'], value['intent'], ctx, value.get('state')),
+                        headers={'Cache-Control': 'no-store'})
 
 # الحقول الآمنة للعرض من اتصال — لا credential_ref، لا أسرار. مؤهَّلة بالاسم
 # المستعار c حتى تعمل مع/بدون انضمام لجدول providers (الذي يشاركها status/config).

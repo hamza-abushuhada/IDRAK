@@ -1,4 +1,6 @@
 'use strict';
+const AFTER_LOGIN = new URLSearchParams(location.search).get('next') === 'connect' ? '/connect' : '/pos';
+if (AFTER_LOGIN === '/connect') document.getElementById('connect-hint').hidden = false;
 // Credentials are sent once over HTTPS and never stored in the page or browser storage.
 async function signIn(body, errorEl, button, fields) {
   errorEl.textContent = '';
@@ -9,7 +11,7 @@ async function signIn(body, errorEl, button, fields) {
     if (response.status === 403) throw new Error('هذه الطريقة غير مفعّلة.');
     if (!response.ok) throw new Error(body.token ? 'تعذّر الدخول. تحقق من رمز المحل.' : 'البريد أو كلمة المرور غير صحيحة.');
     fields.forEach(f => { f.value = ''; });
-    location.replace('/pos');
+    location.replace(AFTER_LOGIN);
   } catch (error) {
     errorEl.textContent = error.message;
   } finally { button.disabled = false; }

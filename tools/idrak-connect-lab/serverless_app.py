@@ -24,7 +24,7 @@ app = FastAPI(title='IDRAK Connect Lab — isolated simulator', docs_url=None, r
 @app.middleware('http')
 async def authentication(request, call_next):
     path = request.url.path
-    public = path in ('/login', '/login.js', '/activate', '/activate.js', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS
+    public = path in ('/login', '/login.js', '/activate', '/activate.js', '/connect', '/connect.js', '/api/connect/context', '/api/connect/approve', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS
     expected = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
     principal = await run_in_threadpool(
         lab.authenticate, request.headers.get('authorization', ''), request.url.path, request.method, expected)
@@ -69,7 +69,7 @@ def static_file(filename, principal=None):
 
 
 def dispatch_get(principal, x_shop, path, query):
-    files = {'/login': 'login.html', '/login.js': 'login.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
+    files = {'/login': 'login.html', '/login.js': 'login.js', '/connect': 'connect.html', '/connect.js': 'connect.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
              '/style.css': 'style.css', '/app.js': 'app.js', '/simulator': 'inbox.html', '/simulator/': 'inbox.html'}
     if path in files:
         return static_file(files[path], principal)

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -16,6 +16,7 @@ import { Badge, Button, Card, Empty, Input, Skeleton } from "@/components/ui";
 import { Drawer } from "@/components/workspace/common";
 import { useSession } from "@/components/app/session";
 import ConnectWizard from "@/components/app/connect/ConnectWizard";
+import { takeFlash, type Flash } from "@/components/app/connect/pending";
 import {
   friendlyError, groupSystems, type Channel, type ConnectedSystem, type Connection, type Counts, type Job,
   type Provider, type SystemStatus,
@@ -53,6 +54,13 @@ export default function IntegrationsPage() {
   const connsQ = useApiQuery<Connection[]>("/integrations/connections", { refetchInterval: 15000, refetchOnWindowFocus: true });
   const [wizard, setWizard] = useState<{ open: boolean; choice: "lab" | null }>({ open: false, choice: null });
   const [manageKey, setManageKey] = useState<string | null>(null);
+  // Success message after returning from the POS approval (set by the callback page).
+  const [flash, setFlash] = useState<Flash | null>(null);
+  useEffect(() => {
+    const value = takeFlash();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of tab storage after mount
+    if (value) setFlash(value);
+  }, []);
   const systems = connsQ.data ? groupSystems(connsQ.data) : undefined;
   const managed = systems?.find((s) => s.key === manageKey) ?? null;
   const refresh = () => {
@@ -70,6 +78,18 @@ export default function IntegrationsPage() {
           <Button onClick={() => setWizard({ open: true, choice: null })} data-basira="connect-new"><Plus size={16} />{tx("Connect a new system", "ربط نظام جديد")}</Button>
         ) : undefined}
       />
+
+      {flash && (
+        <div role="status" className="mb-5 flex items-start gap-2 rounded-xl border border-olive/30 bg-olive-soft p-3 text-[13.5px] text-ink">
+          <CheckCircle2 size={17} className="mt-0.5 shrink-0 text-olive" />
+          <p className="flex-1">
+            {flash.name ? tx(`“${flash.name}” is now linked and appears under your connected systems.`, `تم ربط «${flash.name}» بنجاح وأصبح ضمن أنظمتك المرتبطة.`)
+              : tx("Your shop is now linked and appears under your connected systems.", "تم ربط محلك بنجاح وأصبح ضمن أنظمتك المرتبطة.")}
+            {!flash.ok && " " + tx("The connection check hasn't passed yet: open “Manage connection” to test it again.", "لم ينجح فحص الاتصال بعد: افتح «إدارة الاتصال» لإعادة الاختبار.")}
+          </p>
+          <button type="button" onClick={() => setFlash(null)} className="text-ink-3 hover:text-ink" aria-label={tx("Dismiss", "إغلاق")}><XCircle size={16} /></button>
+        </div>
+      )}
 
       {autoSync === false && (
         <p className="mb-5 flex items-start gap-2 rounded-xl border border-line bg-paper-2/60 p-3 text-[13px] text-ink-2" role="note">

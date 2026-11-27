@@ -40,7 +40,7 @@ $('activate').addEventListener('submit', async event => {
   $('submit').disabled = true;
   const {ok, status} = await post('/auth/activate', {token, password});
   $('password').value = ''; $('confirm').value = '';
-  if (ok) { location.replace('/pos'); return; }
+  if (ok) { location.replace(sessionStorage.getItem('idrak_connect') ? '/connect' : '/pos'); return; }
   $('submit').disabled = false;
   $('error').textContent = status === 429 ? 'محاولات كثيرة. انتظر قليلًا ثم حاول مجددًا.'
     : status === 401 ? 'كلمة المرور الحالية غير صحيحة.'
