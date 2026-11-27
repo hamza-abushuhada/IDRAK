@@ -37,7 +37,7 @@ fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
   }
   if(session.email){const who=document.createElement('span');who.className='pill who';who.dir='ltr';who.textContent=session.email+' · '+(owner?'صاحب المحل':'كاشير');nav?.append(who);}
   if(session.kind==='shop'){
-    if(owner){setupPairing(session, nav);if(session.via==='password')setupTeam(nav);}
+    if(owner){if(new URLSearchParams(location.search).get('pairing')==='manual')setupPairing(session, nav);if(session.via==='password')setupTeam(nav);}
     const button=document.createElement('button');button.className='btn secondary small';button.textContent='تسجيل الخروج';
     button.onclick=async()=>{await fetch('/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});location.replace('/login');};
     nav?.append(button);

@@ -51,7 +51,7 @@ class HostedHandler(lab.SourceHandler):
         cookie_principal = browser_auth.authenticate(self.headers.get('Cookie'))
         if browser_auth.COOKIE + '=' in self.headers.get('Cookie', ''):
             self.principal = cookie_principal
-        if path in ('/login', '/login.js', '/activate', '/activate.js', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS and self.principal is None:
+        if path in ('/login', '/login.js', '/activate', '/activate.js', '/connect', '/connect.js', '/api/connect/context', '/api/connect/approve', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS and self.principal is None:
             self.principal = lab.Principal('anonymous')
         if self.command == 'GET' and not lab.page_allowed(self.principal, path):
             self.send_response(303)
@@ -131,7 +131,7 @@ class HostedHandler(lab.SourceHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        pages = {'/login': 'login.html', '/login.js': 'login.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html'}
+        pages = {'/login': 'login.html', '/login.js': 'login.js', '/connect': 'connect.html', '/connect.js': 'connect.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html'}
         if path in pages:
             return self.serve_file(pages[path])
         if path == '/auth/session':

@@ -627,6 +627,9 @@ def handle_source_get(principal,x_shop,path,q):
     return source_get(shop,path,q)
 
 def handle_source_post(principal,x_shop,path,req):
+    if path in ('/api/connect/context','/api/connect/approve'):
+        import connect_flow  # checks ownership of the chosen shop itself
+        return connect_flow.handle(principal,path,req)
     if path not in CASHIER_POST and principal.kind!='integration':require_owner(principal)
     if path=='/api/shops/invite':
         import lab_users
@@ -733,6 +736,8 @@ class SourceHandler(BaseHandler):
         if path=='/pos':return self.serve_file('pos.html')
         if path=='/shop':return self.serve_file('shop.html')
         if path=='/admin':return self.serve_file('admin.html')
+        if path=='/connect':return self.serve_file('connect.html')
+        if path=='/connect.js':return self.serve_file('connect.js')
         if path=='/style.css':return self.serve_file('style.css')
         if path=='/app.js':return self.serve_file('app.js')
         if path.startswith('/api/') or path=='/health':

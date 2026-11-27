@@ -2,13 +2,16 @@
 
 import { useState } from "react";
 import clsx from "clsx";
-import { ArrowLeft, ArrowRight, CheckCircle2, FlaskConical, Globe, Loader2, ShoppingBag, Sparkles, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, Globe, Loader2, LogIn, ShieldCheck, ShoppingBag, Sparkles, Undo2, XCircle } from "lucide-react";
 import { useTx } from "@/i18n";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, getOrgId } from "@/lib/api";
+import { LAB_LOGIN_URL } from "@/lib/labUrl";
+import { useSession } from "@/components/app/session";
 import { Badge, Button, Input } from "@/components/ui";
 import { Drawer } from "@/components/workspace/common";
 import LabPairing, { type Paired } from "@/components/app/LabPairing";
 import { friendlyError, type Provider } from "./model";
+import { savePending } from "./pending";
 
 type SystemType = "pos" | "store";
 type Choice = "lab" | "demo";
@@ -16,6 +19,10 @@ type Step = "type" | "provider" | "instructions" | "authorize" | "name" | "test"
 type Check = { name: string; ok: boolean };
 type TestResult = { ok: boolean; checks: Check[] };
 const STEPS: Step[] = ["type", "provider", "instructions", "authorize", "name", "test", "done"];
+// Lab: after "Continue to your POS" the owner signs in and approves there, then returns to IDRAK.
+const LAB_STEPS: Step[] = ["type", "provider", "instructions", "done"];
+// The manual pairing-code method stays as an admin fallback, reachable only with ?pairing=manual.
+const manualPairing = () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("pairing") === "manual";
 
 /** Coming-soon connector categories by system type. Generic categories only: no real vendor is claimed as supported. */
 const SOON_FOR: Record<SystemType, string[]> = { pos: ["cloud_api", "local_agent", "file_export"], store: ["cloud_api"] };
@@ -25,6 +32,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, initialCh
   initialChoice?: Choice | null; onConnected: () => void;
 }) {
   const tx = useTx();
+  const { session } = useSession();
   const [step, setStep] = useState<Step>(initialChoice ? "instructions" : "type");
   const [type, setType] = useState<SystemType>("pos");
   const [choice, setChoice] = useState<Choice | null>(initialChoice ?? null);
@@ -47,7 +55,26 @@ export default function ConnectWizard({ open, onOpenChange, providers, initialCh
     onOpenChange(o);
   }
   const go = (s: Step) => { setError(""); setStep(s); };
-  const index = STEPS.indexOf(step);
+  const flow = choice === "lab" && STEPS.indexOf(step) <= 2 ? LAB_STEPS : STEPS;
+  const index = flow.indexOf(step);
+
+  async function continueToPos() {
+    setBusy(true); setError("");
+    try {
+      const org = getOrgId(), user = session?.user.id;
+      if (!org || !user) throw new ApiError(401, "no session");
+      const r = await api<{ authorize_url: string; intent: string; state: string; expires_at: number }>(
+        "/integrations/lab/authorize", { method: "POST", json: { locale: tx.isAr ? "ar" : "en" } });
+      // Only ever leave for the configured Lab's consent page.
+      const target = new URL(r.authorize_url);
+      if (!LAB_LOGIN_URL || target.origin !== new URL(LAB_LOGIN_URL).origin || target.pathname !== "/connect" || target.search) throw new ApiError(503, "lab origin");
+      savePending({ intent: r.intent, state: r.state, org, user, expires_at: r.expires_at });
+      window.location.assign(r.authorize_url);
+    } catch (e) {
+      setError(friendlyError(e instanceof ApiError ? e.status : undefined, tx.isAr));
+      setBusy(false);
+    }
+  }
   const Back = tx.isAr ? ArrowRight : ArrowLeft;
 
   async function connectDemo() {
@@ -88,12 +115,12 @@ export default function ConnectWizard({ open, onOpenChange, providers, initialCh
   const testOk = testDone && test.every((t) => t.result?.ok);
 
   const title = tx("Connect a new system", "ربط نظام جديد");
-  const stepLabel = step === "done" ? "" : tx(`Step ${index + 1} of ${STEPS.length - 1}`, `الخطوة ${index + 1} من ${STEPS.length - 1}`);
+  const stepLabel = step === "done" ? "" : tx(`Step ${index + 1} of ${flow.length - 1}`, `الخطوة ${index + 1} من ${flow.length - 1}`);
 
   return (
     <Drawer open={open} onOpenChange={reset} title={title} subtitle={stepLabel}>
       <ol className="mb-5 flex gap-1" aria-hidden>
-        {STEPS.slice(0, -1).map((s, i) => <li key={s} className={clsx("h-1.5 flex-1 rounded-full", i <= index ? "bg-terra" : "bg-sand")} />)}
+        {flow.slice(0, -1).map((s, i) => <li key={s} className={clsx("h-1.5 flex-1 rounded-full", i <= index ? "bg-terra" : "bg-sand")} />)}
       </ol>
       {error && <p role="alert" className="mb-4 rounded-lg bg-danger/10 p-3 text-[13px] text-danger">{error}</p>}
 
@@ -124,7 +151,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, initialCh
               body={type === "pos"
                 ? tx("A standalone test POS for trying the integration. Links its cashier and its online store together.", "نظام كاشير اختباري مستقل لتجربة الربط. يربط الكاشير والمتجر الإلكتروني التابعين للمحل معًا.")
                 : tx("The test online store of an IDRAK Connect Lab shop. Links together with that shop's cashier.", "المتجر الإلكتروني الاختباري لمحل في IDRAK Connect Lab. يُربط مع كاشير المحل نفسه.")}
-              method={tx("Pairing code", "رمز اقتران")} />
+              method={tx("Sign in to your POS and approve", "تسجيل الدخول إلى نظام الكاشير والموافقة")} />
             {type === "pos" && (
               <ProviderOption disabled={!demoAvailable} onClick={() => { setChoice("demo"); go("instructions"); }}
                 title={tx("Demo POS", "كاشير تجريبي")} badge={<Badge tone="neutral"><Sparkles size={11} />{tx("Sample data", "بيانات وهمية")}</Badge>}
@@ -142,22 +169,34 @@ export default function ConnectWizard({ open, onOpenChange, providers, initialCh
 
       {step === "instructions" && choice && (
         <section aria-labelledby="w-instr">
-          <h3 id="w-instr" className="font-serif text-[17px] text-ink">{tx("Before you start", "قبل أن تبدأ")}</h3>
+          <h3 id="w-instr" className="font-serif text-[17px] text-ink">{choice === "lab" ? tx("Link your shop", "ربط محلك") : tx("Before you start", "قبل أن تبدأ")}</h3>
           {choice === "lab" ? (
-            <ol className="mt-3 list-decimal space-y-2 ps-5 text-[13.5px] text-ink-2">
-              <li>{tx("Sign in to your shop in IDRAK Connect Lab as its owner (with your Lab email and password).", "سجّل الدخول إلى محلك في IDRAK Connect Lab بصفتك المالك (ببريدك وكلمة مرورك في المحاكي).")}</li>
-              <li>{tx("Here, create a link request and copy it.", "أنشئ هنا طلب ربط وانسخه.")}</li>
-              <li>{tx("In the Lab, choose “Connect to IDRAK”, paste the request and copy the pairing code.", "في المحاكي اختر «ربط مع IDRAK»، الصق الطلب وانسخ رمز الاقتران.")}</li>
-              <li>{tx("Come back and enter the code. Keep this window open until you finish.", "عُد هنا وأدخل الرمز. أبقِ هذه النافذة مفتوحة حتى تنتهي.")}</li>
+            <ol className="mt-4 space-y-3 text-[13.5px] text-ink-2">
+              {([[LogIn, tx("Sign in to your POS", "سجّل الدخول إلى نظام الكاشير"), tx("With your POS email and password, not your IDRAK account.", "ببريدك وكلمة مرورك في نظام الكاشير، وليس حساب إدراك.")],
+                 [ShieldCheck, tx("Choose your shop and approve", "اختر محلك ووافق"), tx("Only the shop owner can approve. You'll see exactly what IDRAK can read.", "الموافقة لمالك المحل فقط، وسترى بوضوح ما يستطيع إدراك قراءته.")],
+                 [Undo2, tx("You'll come back here automatically", "ستعود إلى هنا تلقائيًا"), tx("Your shop then appears under your connected systems.", "ويظهر محلك ضمن أنظمتك المرتبطة.")]] as const)
+                .map(([Icon, head, hint], i) => (
+                  <li key={i} className="flex items-start gap-3">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-terra-soft text-terra-2"><Icon size={16} /></span>
+                    <span><span className="block font-medium text-ink">{head}</span><span className="block text-[12.5px] text-ink-3">{hint}</span></span>
+                  </li>
+                ))}
             </ol>
           ) : (
             <p className="mt-3 text-[13.5px] text-ink-2">{tx("The demo POS creates sample sales in this business so you can see how syncing and reports work. You can disconnect it at any time; imported sample data stays.", "الكاشير التجريبي ينشئ مبيعات وهمية في هذه المؤسسة لتجربة المزامنة والتقارير. يمكنك قطع الاتصال في أي وقت مع بقاء البيانات المستوردة.")}</p>
           )}
           <p className="mt-4 rounded-lg bg-sand/60 p-3 text-[12.5px] text-ink-3">{tx("IDRAK only reads the sales data you authorize. It never asks for your POS passwords.", "إدراك يقرأ فقط بيانات المبيعات التي تأذن بها، ولا يطلب كلمات مرور نظام الكاشير.")}</p>
           <div className="mt-5 flex gap-2">
-            {!initialChoice && <Button variant="ghost" size="sm" onClick={() => go("provider")}><Back size={14} />{tx("Back", "رجوع")}</Button>}
-            <Button onClick={() => go("authorize")}>{tx("Continue", "متابعة")}</Button>
+            {!initialChoice && <Button variant="ghost" size="sm" onClick={() => go("provider")} disabled={busy}><Back size={14} />{tx("Back", "رجوع")}</Button>}
+            {choice === "lab"
+              ? <Button onClick={continueToPos} loading={busy} disabled={busy}>{tx("Continue to your POS", "متابعة إلى نظام الكاشير")}<ExternalLink size={14} /></Button>
+              : <Button onClick={() => go("authorize")}>{tx("Continue", "متابعة")}</Button>}
           </div>
+          {choice === "lab" && manualPairing() && (
+            <button type="button" onClick={() => go("authorize")} className="mt-4 text-[12px] text-ink-3 underline">
+              {tx("Admin fallback: link with a pairing code", "بديل إداري: الربط برمز اقتران")}
+            </button>
+          )}
         </section>
       )}
 

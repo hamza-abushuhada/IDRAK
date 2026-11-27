@@ -6,8 +6,9 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import uuid4, UUID
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -20,6 +21,10 @@ from ... import db
 # production must be configured.
 LAB_ORIGIN = 'https://idrak-connect-lab.vercel.app'
 TTL = 300
+# The redirect flow lets the owner sign in to their POS first; the code itself still lives TTL.
+REDIRECT_TTL = 600
+LOCALES = ('ar', 'en')
+_STATE_RE = re.compile(r'[A-Za-z0-9_-]{43}')
 _HOST_RE = re.compile(r'(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+')
 _RESERVED_SUFFIXES = ('.localhost', '.local', '.internal', '.test', '.invalid', '.example', '.lan', '.home.arpa')
 
@@ -128,17 +133,44 @@ def cipher():
         raise HTTPException(503, 'Connection encryption is not configured') from None
 
 
+def _sign(data):
+    encoded = base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':'), ensure_ascii=False).encode()).decode()
+    return encoded + '.' + hmac.new(key(), b'intent:' + encoded.encode(), hashlib.sha256).hexdigest()
+
+
 def new_intent(org_id, user_id):
     cipher()  # Fail before issuing a request that cannot be persisted securely.
     configured_origin()  # ...or redeemed against a valid Lab origin.
     data = {'aud': 'idrak-lab-pairing-v1', 'org': str(org_id), 'user': str(user_id),
             'nonce': str(uuid4()), 'exp': int(time.time()) + TTL}
-    encoded = base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':')).encode()).decode()
-    signature = hmac.new(key(), b'intent:' + encoded.encode(), hashlib.sha256).hexdigest()
-    return {'intent': encoded + '.' + signature, 'expires_at': data['exp']}
+    return {'intent': _sign(data), 'expires_at': data['exp']}
 
 
-def validate_intent(value, org_id, user_id):
+def clean_name(value, limit=80):
+    if not isinstance(value, str):
+        return ''
+    value = ''.join(ch for ch in value if ch.isprintable())
+    return ' '.join(value.split())[:limit]
+
+
+def new_authorization(org_id, user_id, locale, org_name=''):
+    """Start the redirect flow: a signed request bound to this org + user and to
+    sha256(state). Returns the Lab address to send the browser to; the request
+    and state travel only in the URL fragment (never sent to servers or logs).
+    The browser keeps intent + state for the callback; the server re-checks both."""
+    cipher()
+    origin = configured_origin()
+    state = secrets.token_urlsafe(32)
+    data = {'aud': 'idrak-lab-pairing-v1', 'org': str(org_id), 'user': str(user_id), 'nonce': str(uuid4()),
+            'exp': int(time.time()) + REDIRECT_TTL, 'flow': 'redirect',
+            'sh': hashlib.sha256(state.encode()).hexdigest(), 'lang': locale if locale in LOCALES else 'ar',
+            'name': clean_name(org_name)}
+    intent = _sign(data)
+    return {'authorize_url': origin + '/connect#' + urlencode({'request': intent, 'state': state}),
+            'intent': intent, 'state': state, 'expires_at': data['exp']}
+
+
+def validate_intent(value, org_id, user_id, state=None):
     signing_key = key()
     try:
         if not isinstance(value, str) or len(value) > 2048:
@@ -150,9 +182,18 @@ def validate_intent(value, org_id, user_id):
         data = json.loads(base64.urlsafe_b64decode(encoded))
         if data['aud'] != 'idrak-lab-pairing-v1' or data['org'] != str(org_id) or data['user'] != str(user_id):
             raise ValueError()
-        if type(data['exp']) is not int or not time.time() < data['exp'] <= time.time() + TTL + 5:
+        redirect = data.get('flow') == 'redirect'
+        ttl = REDIRECT_TTL if redirect else TTL
+        if type(data['exp']) is not int or not time.time() < data['exp'] <= time.time() + ttl + 5:
             raise ValueError()
         UUID(data['nonce'])
+        # Redirect requests are redeemable only with the state they were issued with;
+        # manual pairing requests never take one.
+        if redirect != (state is not None):
+            raise ValueError()
+        if redirect and (not isinstance(state, str) or not _STATE_RE.fullmatch(state) or not hmac.compare_digest(
+                hashlib.sha256(state.encode()).hexdigest(), data.get('sh') or '')):
+            raise ValueError()
     except (KeyError, ValueError, TypeError):
         raise HTTPException(400, 'Invalid or expired pairing request for this user and organization') from None
 
@@ -189,11 +230,13 @@ async def exchange_remote(code, intent, origin):
         raise HTTPException(502, 'Lab pairing service unavailable; request a new pairing code') from None
 
 
-async def redeem(code, intent, ctx):
-    validate_intent(intent, ctx.org_id, ctx.user.id)
+async def redeem(code, intent, ctx, state=None):
+    validate_intent(intent, ctx.org_id, ctx.user.id, state)
     origin = configured_origin()
     encryption = cipher()
-    credentials = validate_credentials(await exchange_remote(code, intent, origin), ctx.org_id)
+    response = await exchange_remote(code, intent, origin)
+    credentials = validate_credentials(response, ctx.org_id)
+    shop_name = clean_name(response.get('shop_name'), 60)
     shop = credentials['shop_id']
     encrypted = encryption.encrypt(json.dumps(credentials).encode()).decode()
     connections = []
@@ -218,10 +261,10 @@ async def redeem(code, intent, ctx):
             else:
                 cid = await c.fetchval('''INSERT INTO pos_connections(org_id,provider_code,account_ref,display_name,status,config,created_by)
                                           VALUES($1,$2,$3,$4,'connected',$5,$6) RETURNING id''',
-                                       ctx.org_id, provider, shop, 'Paired Lab ' + provider, config, ctx.user.id)
+                                       ctx.org_id, provider, shop, shop_name or 'Paired Lab ' + provider, config, ctx.user.id)
             connections.append({'id': str(cid), 'provider_code': provider})
     await db.audit(ctx.org_id, ctx.user.id, 'pos.lab_paired', 'lab_shop', shop, {'connections': connections})
-    return {'shop_id': shop, 'connections': connections}
+    return {'shop_id': shop, 'name': shop_name, 'connections': connections}
 
 
 async def load_credentials(connection, org_id):

@@ -10,6 +10,7 @@ import time
 import demo_server as lab
 
 TTL = 300
+REDIRECT_TTL = 600
 DDL = '''
 CREATE TABLE IF NOT EXISTS lab_pairing_codes (
   code_hash TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(shop_id),
@@ -49,7 +50,9 @@ def read_intent(value):
         if not hmac.compare_digest(signature, expected):
             raise ValueError()
         data = json.loads(base64.urlsafe_b64decode(encoded))
-        if data['aud'] != 'idrak-lab-pairing-v1' or type(data['exp']) is not int or not time.time() < data['exp'] <= time.time() + TTL + 5:
+        # Redirect-flow requests allow time to sign in to the POS; codes stay at TTL.
+        ttl = REDIRECT_TTL if data.get('flow') == 'redirect' else TTL
+        if data['aud'] != 'idrak-lab-pairing-v1' or type(data['exp']) is not int or not time.time() < data['exp'] <= time.time() + ttl + 5:
             raise ValueError()
         from uuid import UUID
         for field in ('org', 'user', 'nonce'):
@@ -100,7 +103,7 @@ def exchange(raw, authorization):
         if not row or row['used'] or row['expires_at'] <= time.time() or row['intent_hash'] != digest(intent) or row['org_id'] != data['org'] or row['user_id'] != data['user']:
             raise lab.LabAuthError(409, 'Pairing code is invalid, expired or already used')
         shop = row['shop_id']
-        enabled = db.execute('SELECT 1 FROM shops WHERE shop_id=? AND disabled=0', (shop,)).fetchone()
+        enabled = db.execute('SELECT name FROM shops WHERE shop_id=? AND disabled=0', (shop,)).fetchone()
         if not enabled:
             raise lab.LabAuthError(409, 'Shop is unavailable')
         binding = db.execute('SELECT org_id FROM lab_bindings WHERE shop_id=?', (shop,)).fetchone()
@@ -112,7 +115,8 @@ def exchange(raw, authorization):
                    (shop, data['org'], digest(secret), lab.iso_now()))
         db.execute('UPDATE lab_pairing_codes SET used=1 WHERE code_hash=?', (digest(code),))
     # This response is server-to-server only. Never forward it to the browser.
-    return {'shop_id': shop, 'org_id': data['org'], 'token': f'lc.{shop}.{secret}', 'webhook_secret': lab.shop_secret(shop)}
+    return {'shop_id': shop, 'org_id': data['org'], 'token': f'lc.{shop}.{secret}', 'webhook_secret': lab.shop_secret(shop),
+            'shop_name': enabled['name']}
 
 
 def integration_principal(authorization, path, method):
