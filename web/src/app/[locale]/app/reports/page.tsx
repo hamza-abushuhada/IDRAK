@@ -109,6 +109,8 @@ function Sheet({ s }: { s: Summary }) {
           {d.deltas.revenue !== null && d.deltas.revenue !== undefined && tx(` (${d.deltas.revenue >= 0 ? "up" : "down"} ${num(Math.abs(d.deltas.revenue), 1)}% on the previous ${s.period_days} days)`,
             ` (${d.deltas.revenue >= 0 ? "أعلى" : "أقل"} بـ ${num(Math.abs(d.deltas.revenue), 1)}% من الـ ${s.period_days} يوم اللي قبل)`)}
           {tx(` with a gross profit of ${jd(k.profit, locale, { decimals: 0 })}.`, ` بربح إجمالي ${jd(k.profit, locale, { decimals: 0 })}.`)}
+          {!!k.returns_value && tx(` Both are net of ${jd(k.returns_value, locale, { decimals: 0 })} in returns (gross sales ${jd(k.gross_sales ?? k.revenue, locale, { decimals: 0 })}).`,
+            ` الرقمان صافيان بعد خصم مرتجعات بقيمة ${jd(k.returns_value, locale, { decimals: 0 })} (إجمالي المبيعات قبل المرتجعات ${jd(k.gross_sales ?? k.revenue, locale, { decimals: 0 })}).`)}
           {best && tx(` ${best.name} was the strongest branch.`, ` أقوى فرع كان ${nm(best.name, best.name_ar)}.`)}
           {monthlyLeak > 0 && tx(` We estimate about ${jd(monthlyLeak, locale, { decimals: 0 })} a month is leaking — details below.`, ` منقدّر إنه في حوالي ${jd(monthlyLeak, locale, { decimals: 0 })} بالشهر عم تتسرّب — التفاصيل تحت.`)}
         </p>

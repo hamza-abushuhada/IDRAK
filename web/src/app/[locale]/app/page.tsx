@@ -109,6 +109,9 @@ function DashboardScreen() {
 
       {q.error ? <ErrorBox error={q.error} retry={() => q.refetch()} /> : (
         <>
+          <p className="mb-3 text-[12px] text-ink-3" role="note">
+            {tx("Sales and profit are net of returns: returns are deducted from the totals.", "المبيعات والأرباح صافية بعد خصم المرتجعات.")}
+          </p>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5">
             {!k ? Array.from({ length: 5 }).map((_, i) => <StatSkeleton key={i} />) : (<>
               <Stat id="kpi-revenue" tone="terra" label={tx("Net sales", "صافي المبيعات")} value={<Money v={k.revenue} compact />} delta={d.deltas.revenue}
