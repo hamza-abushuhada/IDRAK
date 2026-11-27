@@ -47,3 +47,8 @@ Database: `api/db/migrations/013_loyverse_oauth.sql` (additive; apply separately
 - The exact `receipts.update` payload. The docs show a payload example only for `inventory_levels.update`; the connector therefore relies only on `merchant_id` and `type`.
 - What Loyverse returns to the redirect URI when the owner denies access (assumed to be the standard `?error=access_denied&state=`).
 - The access-token lifetime in practice (docs example: `expires_in: 43200`), and whether refresh tokens rotate.
+
+## Observed on the real API (Staging, 2026-11-27)
+- OAuth: authorize, approval, code exchange (`/oauth/token` 200), `/merchant/` 200 and `/stores` 200 all worked with the three scopes. Granted scope: `MERCHANT_READ RECEIPTS_READ STORES_READ`.
+- Access token lifetime: about **720 hours** (30 days), not the 12 hours in the reference example. Refresh handles any value.
+- `GET /webhooks/` returns **`{"webhooks": [...]}`**, not the bare array the reference shows. This crashed the first real link; both shapes are now accepted. Webhook setup can never fail a link: a failure is shown on the connection, and Sync now still works.

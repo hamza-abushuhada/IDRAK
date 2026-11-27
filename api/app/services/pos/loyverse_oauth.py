@@ -211,35 +211,50 @@ async def connect(code: str, intent: str, state: str, ctx, transport=None, api_t
             cid = await c.fetchval('''INSERT INTO pos_connections(org_id,provider_code,account_ref,display_name,status,config,created_by)
                                       VALUES($1,$2,$3,$4,'connected',$5,$6) RETURNING id''',
                                    ctx.org_id, PROVIDER, merchant_id, str(merchant.get('business_name') or 'Loyverse')[:60], conf, ctx.user.id)
-    webhook = await ensure_webhook(merchant_id, tokens['access_token'], cfg, api_transport)
+    webhook = await ensure_webhook(merchant_id, tokens['access_token'], cfg, api_transport, org_id=ctx.org_id)
     await db.audit(ctx.org_id, ctx.user.id, 'pos.loyverse_connected', 'pos_connection', str(cid),
                    {'stores': len(names), 'webhook': bool(webhook)})
     return {'connection_id': str(cid), 'name': str(merchant.get('business_name') or 'Loyverse')[:60],
             'stores': [{'name': n} for n in names.values()], 'automatic_updates': bool(webhook)}
 
 
-async def ensure_webhook(merchant_id, access_token, cfg, api_transport=None):
-    """Create (or reuse) the app-owned receipts.update webhook. Failure is not fatal: Sync now still works."""
+def webhook_list(data) -> list[dict]:
+    """GET /webhooks/ list. Observed on the real API (2026-11-27): {"webhooks": [...]}.
+    The reference shows a bare array; both are accepted, anything else is treated as empty."""
+    items = data.get('webhooks') if isinstance(data, dict) else data
+    return [w for w in items if isinstance(w, dict)] if isinstance(items, list) else []
+
+
+async def ensure_webhook(merchant_id, access_token, cfg, api_transport=None, org_id=None):
+    """Create (or reuse) the app-owned receipts.update webhook.
+    Never raises: linking must not fail because of it. On failure the connection keeps
+    working with Sync now and shows a clear, secret-free message."""
+    hook, problem = None, None
     try:
         async with httpx.AsyncClient(base_url=loyverse.API_BASE, timeout=20, follow_redirects=False, trust_env=False,
                                      transport=api_transport, headers={'Authorization': 'Bearer ' + access_token}) as c:
             existing = await c.get('/webhooks/')
             if existing.status_code == 200:
-                for w in existing.json() or []:
-                    if w.get('type') == 'receipts.update' and w.get('url') == cfg['webhook_url'] and w.get('status') == 'ENABLED':
-                        hook = w['id']; break
-                else:
-                    hook = None
-            else:
-                hook = None
+                for w in webhook_list(existing.json()):
+                    if w.get('type') == 'receipts.update' and w.get('url') == cfg['webhook_url'] and w.get('status') == 'ENABLED' and w.get('id'):
+                        hook = str(w['id']); break
             if not hook:
                 r = await c.post('/webhooks/', json={'url': cfg['webhook_url'], 'type': 'receipts.update', 'status': 'ENABLED'})
-                hook = r.json().get('id') if r.status_code == 200 else None
-    except (httpx.HTTPError, ValueError):
-        hook = None
+                body = r.json() if r.content else {}
+                created = body if isinstance(body, dict) and 'id' in body else (body.get('webhook') if isinstance(body, dict) else None)
+                if r.status_code in (200, 201) and isinstance(created, dict) and created.get('id'):
+                    hook = str(created['id'])
+                else:
+                    problem = f'Loyverse did not create the receipts webhook (HTTP {r.status_code})'
+    except Exception as exc:  # noqa: BLE001 - recorded without secrets
+        problem = f'Automatic updates could not be set up ({type(exc).__name__})'
     if hook:
         await db.execute("UPDATE pos_oauth_credentials SET webhook_ids=$3, updated_at=now() WHERE provider_code=$1 AND account_ref=$2",
-                         PROVIDER, merchant_id, [str(hook)])
+                         PROVIDER, merchant_id, [hook])
+    elif org_id is not None:
+        await db.execute("""UPDATE pos_connections SET last_error=$4, updated_at=now()
+                            WHERE org_id=$1 AND provider_code=$2 AND account_ref=$3""",
+                         org_id, PROVIDER, merchant_id, (problem or 'Automatic updates are not set up') + '. Sync now still works.')
     return hook
 
 

@@ -240,3 +240,50 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await loyverse_oauth.handle_webhook(raw, sig), {"status": "ignored"}, "unknown/disconnected account")
         other = json.dumps({"merchant_id": "m-1", "type": "items.update"}).encode()
         self.assertEqual(await loyverse_oauth.handle_webhook(other, hmac.new(b"synthetic-client-secret-xyz", other, hashlib.sha1).hexdigest()), {"status": "ignored"})
+
+
+class WebhookSetupTests(unittest.IsolatedAsyncioTestCase):
+    """Regression: the real GET /webhooks/ returned {"webhooks": [...]} (observed 2026-11-27),
+    not the bare array shown in the reference; setup crashed and failed the whole link."""
+    CFG = {"webhook_url": "https://api.idrak.example.com/integrations/loyverse/webhook"}
+
+    def test_webhook_list_shapes(self):
+        hook = {"id": "w1", "type": "receipts.update", "url": "u", "status": "ENABLED"}
+        self.assertEqual(loyverse_oauth.webhook_list({"webhooks": [hook]}), [hook], "observed real shape")
+        self.assertEqual(loyverse_oauth.webhook_list([hook]), [hook], "documented shape")
+        for junk in ({"webhooks": None}, {"other": []}, "x", None, {"webhooks": ["str", 1]}):
+            self.assertEqual(loyverse_oauth.webhook_list(junk), [])
+
+    async def run_setup(self, handler):
+        with patch.object(loyverse_oauth.db, "execute", new=AsyncMock()) as write:
+            hook = await loyverse_oauth.ensure_webhook("m-1", "token", self.CFG, httpx.MockTransport(handler), org_id="org-1")
+        return hook, write
+
+    async def test_creates_when_real_shape_has_none(self):
+        posted = []
+        def handler(req):
+            if req.method == "GET": return httpx.Response(200, json={"webhooks": []})
+            posted.append(json.loads(req.content)); return httpx.Response(200, json={"id": "wh-9", **posted[-1]})
+        hook, write = await self.run_setup(handler)
+        self.assertEqual(hook, "wh-9")
+        self.assertEqual(posted, [{"url": self.CFG["webhook_url"], "type": "receipts.update", "status": "ENABLED"}])
+        self.assertIn("pos_oauth_credentials", write.await_args.args[0])
+
+    async def test_reuses_existing_from_real_shape(self):
+        def handler(req):
+            assert req.method == "GET", "must not create a duplicate"
+            return httpx.Response(200, json={"webhooks": [{"id": "wh-1", "type": "receipts.update", "url": self.CFG["webhook_url"], "status": "ENABLED"}]})
+        hook, _ = await self.run_setup(handler)
+        self.assertEqual(hook, "wh-1")
+
+    async def test_failures_never_break_linking_and_are_recorded_without_secrets(self):
+        cases = [lambda r: httpx.Response(200, json="unexpected") if r.method == "GET" else httpx.Response(403, json={"errors": [{"code": "FORBIDDEN"}]}),
+                 lambda r: httpx.Response(200, content=b"not json"),
+                 lambda r: (_ for _ in ()).throw(RuntimeError("boom token=SECRET"))]
+        for handler in cases:
+            hook, write = await self.run_setup(handler)
+            self.assertIsNone(hook)
+            sql, *args = write.await_args.args
+            self.assertIn("pos_connections", sql)
+            self.assertIn("Sync now still works", args[-1])
+            self.assertNotIn("SECRET", args[-1])
