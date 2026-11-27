@@ -46,3 +46,30 @@ export function readReturn(hash: string) {
     denied: error === "access_denied",
   };
 }
+
+export type OAuthDiag = { query: string[]; fragment: string[]; code: { present: boolean; length: number; classes: string[] } };
+
+/** Raw query/fragment parsing: decodeURIComponent only, so a literal "+" in a code is
+ *  never turned into a space (URLSearchParams would). No format is assumed for the
+ *  vendor's authorization code beyond sane bounds; the server-side exchange decides. */
+export function readOAuthReturn(search: string, hash: string) {
+  const parse = (s: string) => {
+    const out = new Map<string, string>();
+    for (const part of s.replace(/^[?#]/, "").split("&")) {
+      if (!part) continue;
+      const i = part.indexOf("=");
+      const k = i < 0 ? part : part.slice(0, i);
+      const v = i < 0 ? "" : part.slice(i + 1);
+      try { out.set(decodeURIComponent(k), decodeURIComponent(v)); } catch { out.set(k, ""); }
+    }
+    return out;
+  };
+  const q = parse(search), f = parse(hash);
+  const raw = q.get("code") ?? f.get("code") ?? "";
+  const state = q.get("state") ?? f.get("state") ?? "";
+  const code = raw.length >= 1 && raw.length <= 4096 && !/[\s\u0000-\u001f\u007f]/.test(raw) ? raw : "";
+  const classes = [/[A-Za-z]/.test(raw) && "letters", /\d/.test(raw) && "digits",
+    ...Array.from(new Set(raw.replace(/[A-Za-z0-9]/g, "").split(""))).map((ch) => (/\s/.test(ch) ? "space" : ch))].filter(Boolean) as string[];
+  const diag: OAuthDiag = { query: [...q.keys()], fragment: [...f.keys()], code: { present: raw.length > 0, length: raw.length, classes } };
+  return { code, state: /^[A-Za-z0-9_-]{43}$/.test(state) ? state : "", denied: !!(q.get("error") ?? f.get("error")), diag };
+}

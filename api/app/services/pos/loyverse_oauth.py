@@ -154,10 +154,16 @@ def _decrypt(blob: str) -> dict:
     return json.loads(pairing.cipher().decrypt(blob.encode()))
 
 
+def valid_code(code) -> bool:
+    """Loyverse documents no format for the authorization code: only sane bounds here;
+    the exchange at Loyverse (single-use, bound to our redirect_uri and secret) decides."""
+    return isinstance(code, str) and 1 <= len(code) <= 4096 and not any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in code)
+
+
 async def connect(code: str, intent: str, state: str, ctx, transport=None, api_transport=None) -> dict:
     validate_intent(intent, state, ctx.org_id, ctx.user.id)
     cfg = config()
-    if not isinstance(code, str) or not 8 <= len(code) <= 512:
+    if not valid_code(code):
         raise HTTPException(400, 'Invalid authorization code')
     try:
         tokens = await _token_request({'client_id': cfg['client_id'], 'client_secret': cfg['client_secret'],

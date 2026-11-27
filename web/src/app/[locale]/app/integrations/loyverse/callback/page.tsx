@@ -7,9 +7,9 @@ import { useRouter } from "@/lib/router";
 import { useSession } from "@/components/app/session";
 import { Button, Card } from "@/components/ui";
 import { friendlyError } from "@/components/app/connect/model";
-import { setFlash, takePending, type Pending } from "@/components/app/connect/pending";
+import { readOAuthReturn, setFlash, takePending, type OAuthDiag, type Pending } from "@/components/app/connect/pending";
 
-type View = { kind: "working" } | { kind: "denied" } | { kind: "error"; message: string };
+type View = { kind: "working" } | { kind: "denied" } | { kind: "error"; message: string; diag?: OAuthDiag };
 
 // Loyverse sends the owner back here (registered redirect URI) with ?code&state.
 // The code is single-use and only exchanged server-side with the app secret;
@@ -19,27 +19,21 @@ export default function LoyverseCallbackPage() {
   const router = useRouter();
   const { session, loading } = useSession();
   const [view, setView] = useState<View>({ kind: "working" });
-  const captured = useRef<{ code: string; state: string; denied: boolean; pending: Pending | null } | null>(null);
+  const captured = useRef<{ code: string; state: string; denied: boolean; diag: OAuthDiag; pending: Pending | null } | null>(null);
   const started = useRef(false);
   const home = `/${tx.locale}/app/integrations`;
 
   useEffect(() => {
     if (captured.current) return;
-    const q = new URLSearchParams(window.location.search);
-    const code = q.get("code") || "", state = q.get("state") || "";
+    const ret = readOAuthReturn(window.location.search, window.location.hash);
     window.history.replaceState(null, "", window.location.pathname);  // drop the code from the address bar/history
-    captured.current = {
-      code: /^[A-Za-z0-9._~-]{8,512}$/.test(code) ? code : "",
-      state: /^[A-Za-z0-9_-]{43}$/.test(state) ? state : "",
-      denied: !!q.get("error"),
-      pending: takePending("loyverse"),
-    };
+    captured.current = { ...ret, pending: takePending("loyverse") };
   }, []);
 
   useEffect(() => {
     if (loading || !session || started.current || !captured.current) return;
     started.current = true;
-    const { code, state, denied, pending } = captured.current;
+    const { code, state, denied, diag, pending } = captured.current;
     const restart = tx("Start again from “Connect a new system”.", "ابدأ من جديد من «ربط نظام جديد».");
     if (!pending || !state || pending.state !== state) {
       setView({ kind: "error", message: tx("This return doesn't match a request started in this window, or it expired. ", "هذه العودة لا تطابق طلبًا بدأ من هذه النافذة، أو انتهت صلاحيته. ") + restart });
@@ -50,7 +44,7 @@ export default function LoyverseCallbackPage() {
       return;
     }
     if (denied) { setView({ kind: "denied" }); return; }
-    if (!code) { setView({ kind: "error", message: tx("Loyverse didn't return an approval. ", "لم يُرجع Loyverse موافقة صالحة. ") + restart }); return; }
+    if (!code) { setView({ kind: "error", message: tx("Loyverse didn't return an approval. ", "لم يُرجع Loyverse موافقة صالحة. ") + restart, diag }); return; }
     void (async () => {
       try {
         const r = await api<{ name: string; automatic_updates: boolean }>("/integrations/loyverse/connect",
@@ -88,6 +82,13 @@ export default function LoyverseCallbackPage() {
             <XCircle size={30} className="mx-auto text-danger" />
             <h1 className="mt-4 font-serif text-[20px] text-ink">{tx("We couldn't connect Loyverse", "تعذّر ربط Loyverse")}</h1>
             <p className="mt-2 text-[13.5px] text-ink-3">{view.message}</p>
+            {view.diag && (
+              <details className="mt-4 rounded-lg bg-paper-2/60 p-3 text-start text-[12px] text-ink-3">
+                <summary className="cursor-pointer">{tx("Technical details for support (no codes or secrets)", "تفاصيل تقنية للدعم (بدون رموز أو أسرار)")}</summary>
+                <p className="mt-2" dir="ltr">query: {view.diag.query.join(", ") || "—"} · fragment: {view.diag.fragment.join(", ") || "—"}</p>
+                <p dir="ltr">code: {view.diag.code.present ? `present, ${view.diag.code.length} chars, contains: ${view.diag.code.classes.join(" ") || "—"}` : "absent"}</p>
+              </details>
+            )}
             <Button className="mt-5" onClick={() => router.replace(home)}>{tx("Back to IDRAK Connect", "العودة إلى IDRAK Connect")}</Button>
           </div>
         )}

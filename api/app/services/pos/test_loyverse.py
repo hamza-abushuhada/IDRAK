@@ -223,6 +223,12 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException):
             await loyverse_oauth._token_request({}, httpx.MockTransport(lambda r: httpx.Response(200, json={"token_type": "mac"})))
 
+    def test_authorization_code_format_not_assumed(self):
+        for ok in ("abc", "a/b+c=d", "x" * 600, "Zm9vYmFy/+==", "def50200a1b2.c3-d4_e5~f6"):
+            self.assertTrue(loyverse_oauth.valid_code(ok), ok[:20])
+        for bad in ("", "a b", "a" + chr(10) + "b", "x" * 5000, None, 123):
+            self.assertFalse(loyverse_oauth.valid_code(bad))
+
     async def test_webhook_signature_checked_before_anything(self):
         raw = json.dumps({"merchant_id": "m-1", "type": "receipts.update"}).encode()
         with patch.object(loyverse_oauth.db, "fetchrow", new=AsyncMock()) as fetch:
