@@ -126,6 +126,43 @@ class ConnectGuardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         probe.assert_not_awaited()
 
+    def test_lab_connection_never_created_or_reactivated_without_approval_on_hosted(self):
+        for env in ({"VERCEL": "1", "IDRAK_ENVIRONMENT": "staging", "IDRAK_LAB_BASE_URL": "https://idrak-connect-lab.vercel.app"},
+                    {"VERCEL": "1"}):
+            for code in ("lab_pos", "lab_web"):
+                with patch.dict(os.environ, env), \
+                        patch.object(db, "fetchrow", new=AsyncMock(return_value={"code": code, "is_implemented": True})) as read, \
+                        patch.object(db, "execute", new=AsyncMock()) as write, patch.object(db, "fetchval", new=AsyncMock()) as insert:
+                    response = self.client.post("/integrations/connections", json={"provider_code": code})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(read.await_count, 1, "no lookup of an existing connection to reactivate")
+                write.assert_not_awaited(); insert.assert_not_awaited()
+
+    def test_demo_pos_still_connects_and_reconnects_on_hosted(self):
+        from app.routers import integrations
+        provider = {"code": "demo", "is_implemented": True, "name": "Demo POS"}
+        existing = {"id": "d1", "status": "disconnected"}
+        conn = {"id": "d1", "provider_code": "demo", "status": "connected", "config": {"channel": "in_store", "auto_sync": False}}
+        with patch.dict(os.environ, {"VERCEL": "1"}), \
+                patch.object(db, "fetchrow", new=AsyncMock(side_effect=[provider, existing, conn])), \
+                patch.object(db, "execute", new=AsyncMock()) as write, patch.object(db, "audit", new=AsyncMock()), \
+                patch.object(integrations.pipeline, "run_sync", new=AsyncMock(return_value={"imported": 0})), \
+                patch.object(integrations, "_detail", new=AsyncMock(return_value=conn)):
+            response = self.client.post("/integrations/connections", json={"provider_code": "demo"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["reconnected"])
+        self.assertIn("status='connected'", write.await_args.args[0])
+
+    def test_status_reports_lab_linking_only_when_configured(self):
+        from cryptography.fernet import Fernet
+        keys = {"IDRAK_LAB_PAIRING_KEY": "unit-test-pairing-only-" + "a" * 40, "IDRAK_CONNECT_ENCRYPTION_KEY": Fernet.generate_key().decode()}
+        with patch.dict(os.environ, keys):
+            self.assertTrue(self.client.get("/integrations/status").json()["lab_linking"])
+        with patch.dict(os.environ, {**keys, "IDRAK_LAB_PAIRING_KEY": ""}):
+            self.assertFalse(self.client.get("/integrations/status").json()["lab_linking"])
+        with patch.dict(os.environ, {**keys, "IDRAK_LAB_ORIGIN": "https://not-allowed.example.org"}):
+            self.assertFalse(self.client.get("/integrations/status").json()["lab_linking"])
+
     def test_unpaired_lab_connection_refused_on_serverless(self):
         provider = {"code": "lab_pos", "is_implemented": True}
         with patch.dict(os.environ, {"VERCEL": "1", "IDRAK_ENVIRONMENT": "staging", "IDRAK_LAB_BASE_URL": ""}), \
@@ -162,7 +199,7 @@ class ConnectUiApiTests(unittest.TestCase):
         self.as_role("cashier")
         from app.routers import integrations
         with patch.object(integrations.db, "SERVERLESS", True), patch.dict(os.environ, {"POS_AUTOSYNC": "1"}):
-            self.assertEqual(self.client.get("/integrations/status").json(), {"auto_sync_active": False})
+            self.assertFalse(self.client.get("/integrations/status").json()["auto_sync_active"])
         with patch.object(integrations.db, "SERVERLESS", False), patch.dict(os.environ, {"POS_AUTOSYNC": "0"}):
             self.assertFalse(self.client.get("/integrations/status").json()["auto_sync_active"])
         with patch.object(integrations.db, "SERVERLESS", False), patch.dict(os.environ, {"POS_AUTOSYNC": "1"}):

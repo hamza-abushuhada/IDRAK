@@ -97,3 +97,15 @@ export function friendlyError(status: number | undefined, ar: boolean): string {
   if (status === 503) return t("Connections aren't available right now. Try again later.", "الاتصالات غير متاحة الآن. حاول لاحقًا.");
   return t("Something went wrong. Check your internet connection and try again.", "حدث خطأ. تحقق من اتصالك بالإنترنت وحاول مجددًا.");
 }
+
+/** Automatic sync is shown only when the scheduler really runs AND an active channel has it on (Demo POS is always manual). */
+export function systemAutoSync(system: ConnectedSystem, schedulerActive: boolean): boolean {
+  return schedulerActive && system.channels.some((c) => c.conn.status !== "disconnected" && c.conn.config?.auto_sync === true);
+}
+
+/** Wizard steps map onto the same four phases for every system, so the step count never changes mid-way. */
+export type WizardStep = "type" | "provider" | "connect" | "authorize" | "name" | "test" | "done";
+export const PHASES = 4;
+export function phaseOf(step: WizardStep): number {
+  return step === "type" ? 0 : step === "provider" ? 1 : step === "connect" || step === "authorize" ? 2 : 3;
+}

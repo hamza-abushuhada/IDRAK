@@ -79,7 +79,10 @@ export default function ConnectCallbackPage() {
             <CheckCircle2 size={30} className="mx-auto text-ink-3" />
             <h1 className="mt-4 font-serif text-[20px] text-ink">{tx("Linking was cancelled", "تم إلغاء الربط")}</h1>
             <p className="mt-2 text-[13.5px] text-ink-3">{tx("You declined the request in your POS. Nothing was linked and no data was shared.", "رفضت الطلب في نظام الكاشير. لم يتم أي ربط ولم تُشارك أي بيانات.")}</p>
-            <Button className="mt-5" onClick={() => router.replace(home)}>{tx("Back to IDRAK Connect", "العودة إلى IDRAK Connect")}</Button>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              <Button onClick={() => router.replace(`${home}?connect=lab`)}>{tx("Try again", "حاول مرة أخرى")}</Button>
+              <Button variant="secondary" onClick={() => router.replace(home)}>{tx("Back to IDRAK Connect", "العودة إلى IDRAK Connect")}</Button>
+            </div>
           </div>
         )}
         {view.kind === "error" && (
@@ -87,7 +90,10 @@ export default function ConnectCallbackPage() {
             <XCircle size={30} className="mx-auto text-danger" />
             <h1 className="mt-4 font-serif text-[20px] text-ink">{tx("We couldn't finish linking", "تعذّر إكمال الربط")}</h1>
             <p className="mt-2 text-[13.5px] text-ink-3">{view.message}</p>
-            <Button className="mt-5" onClick={() => router.replace(home)}>{tx("Back to IDRAK Connect", "العودة إلى IDRAK Connect")}</Button>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              <Button onClick={() => router.replace(`${home}?connect=lab`)}>{tx("Try again", "حاول مرة أخرى")}</Button>
+              <Button variant="secondary" onClick={() => router.replace(home)}>{tx("Back to IDRAK Connect", "العودة إلى IDRAK Connect")}</Button>
+            </div>
           </div>
         )}
       </Card>

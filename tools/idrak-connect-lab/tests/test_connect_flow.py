@@ -75,6 +75,7 @@ class ConnectFlowTests(unittest.TestCase):
         self.assertEqual([(s['shop_id'], s['role'], s['can_approve']) for s in body['shops']], [(self.a['shop_id'], 'owner', True)])
         self.assertEqual(self.fragment(body['cancel_url']), {'error': 'access_denied', 'state': state})
         self.assertTrue(body['cancel_url'].startswith(IDRAK + '/ar/app/integrations/callback#'))
+        self.assertEqual(body['retry_url'], IDRAK + '/ar/app/integrations?connect=lab')
         r = self.approve(c, intent, state, self.a)
         self.assertEqual(r.status_code, 200, r.text)
         url = r.json()['redirect']
