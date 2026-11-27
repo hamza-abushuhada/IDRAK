@@ -17,6 +17,7 @@ from ..auth import Ctx, require
 from ..services.pos import pipeline, registry
 from ..services.pos import pairing
 from ..services.pos import autosync
+from ..services.pos import loyverse_oauth
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -37,6 +38,44 @@ async def lab_authorize(body: AuthorizeIn, ctx: Ctx = Depends(require("manage_in
     name = (org["name_ar"] if body.locale == "ar" and org["name_ar"] else org["name"]) if org else ""
     return JSONResponse(pairing.new_authorization(ctx.org_id, ctx.user.id, body.locale, name or ""),
                         headers={'Cache-Control': 'no-store'})
+
+
+class LoyverseAuthorizeIn(BaseModel):
+    locale: str = "ar"
+
+
+class LoyverseConnectIn(BaseModel):
+    code: str
+    intent: str
+    state: str
+
+
+@router.post('/loyverse/authorize')
+async def loyverse_authorize(body: LoyverseAuthorizeIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    """Start Loyverse OAuth: the owner signs in and approves at Loyverse."""
+    return JSONResponse(loyverse_oauth.new_authorization(ctx.org_id, ctx.user.id, body.locale), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/loyverse/connect')
+async def loyverse_connect(body: LoyverseConnectIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    """Finish OAuth: server-to-server code exchange; tokens are stored encrypted and never returned."""
+    return JSONResponse(await loyverse_oauth.connect(body.code, body.intent, body.state, ctx), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/loyverse/webhook')
+async def loyverse_webhook(request: Request):
+    """Loyverse receipts.update notifications. Verified by X-Loyverse-Signature (HMAC-SHA1, app
+    client secret) before anything else; then IDRAK re-fetches receipts from the API."""
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 5_000_000:
+            raise HTTPException(413, 'Too large')
+    try:
+        result = await loyverse_oauth.handle_webhook(bytes(raw), request.headers.get('x-loyverse-signature'))
+    except PermissionError:
+        raise HTTPException(401, 'Invalid notification') from None
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
 
 @router.post('/lab/notify', status_code=202)
@@ -114,7 +153,9 @@ def auto_sync_active() -> bool:
 async def integration_status(ctx: Ctx = Depends(require("view_dashboard"))):
     # lab_linking: the UI offers the Lab only where linking is really configured
     # (e.g. Staging). Demo POS never depends on it.
-    return {"auto_sync_active": auto_sync_active(), "lab_linking": pairing.linking_available()}
+    return {"auto_sync_active": auto_sync_active(), "lab_linking": pairing.linking_available(),
+            # Hidden from users until a real Loyverse integration is proven (server flag + credentials).
+            "loyverse_available": loyverse_oauth.available()}
 
 
 class RenameIn(BaseModel):
@@ -294,9 +335,12 @@ async def disconnect(conn_id: str, purge: bool = False, ctx: Ctx = Depends(requi
     """قطع الاتصال. الافتراضي قطع ناعم (يوقف المزامنة ويُبقي البيانات).
     purge=true يحذف الاتصال وكل مبيعاته وأصنافه التي لم تُستخدم في مبيعات أخرى
     — حذف لا يُتراجَع عنه، تؤكّده الواجهة أولاً."""
-    conn = await db.fetchrow("select id from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
+    conn = await db.fetchrow("select id, provider_code, account_ref from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
     if not conn:
         raise HTTPException(404, "Connection not found")
+    if conn["provider_code"] == "loyverse":
+        # Stop at the source too: remove our webhook and wipe stored tokens (sales stay).
+        await loyverse_oauth.disconnect(dict(conn), ctx.org_id)
     if not purge:
         await db.execute("update pos_connections set status='disconnected', updated_at=now() where id=$1 and org_id=$2",
                          conn_id, ctx.org_id)

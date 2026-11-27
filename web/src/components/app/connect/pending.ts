@@ -3,19 +3,21 @@
 // back to the server, which re-verifies intent + state against the signed-in
 // user and business. Tab-scoped (sessionStorage), short-lived, read once.
 const KEY = "idrak-connect-pending";
+const LOYVERSE_KEY = "idrak-loyverse-pending";
 const FLASH = "idrak-connect-flash";
 
 export type Pending = { intent: string; state: string; org: string; user: string; expires_at: number };
 export type Flash = { name: string; ok: boolean };
 
-export function savePending(value: Pending) {
-  sessionStorage.setItem(KEY, JSON.stringify(value));
+export function savePending(value: Pending, provider: "lab" | "loyverse" = "lab") {
+  sessionStorage.setItem(provider === "loyverse" ? LOYVERSE_KEY : KEY, JSON.stringify(value));
 }
 
 /** Returns the pending request once and removes it, so a return can't be replayed. */
-export function takePending(): Pending | null {
-  const raw = sessionStorage.getItem(KEY);
-  sessionStorage.removeItem(KEY);
+export function takePending(provider: "lab" | "loyverse" = "lab"): Pending | null {
+  const key = provider === "loyverse" ? LOYVERSE_KEY : KEY;
+  const raw = sessionStorage.getItem(key);
+  sessionStorage.removeItem(key);
   try {
     const v = raw ? (JSON.parse(raw) as Pending) : null;
     if (!v || typeof v.intent !== "string" || typeof v.state !== "string" || typeof v.org !== "string" || typeof v.user !== "string") return null;

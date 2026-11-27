@@ -50,7 +50,7 @@ export default function IntegrationsPage() {
   const { can } = useSession();
   const canManage = can("manager");
   const providersQ = useApiQuery<Provider[]>("/integrations/providers");
-  const statusQ = useApiQuery<{ auto_sync_active: boolean; lab_linking?: boolean }>("/integrations/status");
+  const statusQ = useApiQuery<{ auto_sync_active: boolean; lab_linking?: boolean; loyverse_available?: boolean }>("/integrations/status");
   const connsQ = useApiQuery<Connection[]>("/integrations/connections", { refetchInterval: 15000, refetchOnWindowFocus: true });
   const [wizard, setWizard] = useState<{ open: boolean; choice: "lab" | null }>({ open: false, choice: null });
   const [manageKey, setManageKey] = useState<string | null>(null);
@@ -140,7 +140,7 @@ export default function IntegrationsPage() {
       </Card>
 
       {canManage && (
-        <ConnectWizard key={`${wizard.choice}-${wizard.open}`} open={wizard.open} initialChoice={wizard.choice} labLinking={labLinking}
+        <ConnectWizard key={`${wizard.choice}-${wizard.open}`} open={wizard.open} initialChoice={wizard.choice} labLinking={labLinking} loyverseAvailable={!!statusQ.data?.loyverse_available}
           onOpenChange={(o) => setWizard((w) => ({ ...w, open: o }))} providers={providersQ.data} onConnected={refresh} />
       )}
       {managed && (

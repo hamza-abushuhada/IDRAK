@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 try:
-    from . import demo, lab
+    from . import demo, lab, loyverse
 except ImportError:  # pragma: no cover
     import demo  # type: ignore
     import lab  # type: ignore
@@ -18,6 +18,7 @@ REGISTRY: dict[str, type] = {
     "demo": demo.DemoPOSAdapter,
     "lab_pos": lab.LabPOSAdapter,
     "lab_web": lab.LabWebAdapter,
+    "loyverse": loyverse.LoyverseAdapter,
 }
 
 
