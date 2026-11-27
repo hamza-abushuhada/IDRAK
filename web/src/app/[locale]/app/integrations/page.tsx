@@ -102,7 +102,7 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {autoSync === false && (
+      {autoSync === false && !systems?.some((s) => systemAutoSync(s, false)) && (
         <p className="mb-5 flex items-start gap-2 rounded-xl border border-line bg-paper-2/60 p-3 text-[13px] text-ink-2" role="note">
           <Info size={16} className="mt-0.5 shrink-0 text-ink-3" />
           {tx("Syncing is manual in this environment: press “Sync now” to bring in the latest sales.", "المزامنة في هذه البيئة يدوية: اضغط «مزامنة الآن» لجلب أحدث المبيعات.")}

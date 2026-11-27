@@ -412,9 +412,9 @@ async def run_sync(org_id: str, user_id: str | None, connection: dict,
         events, next_cursor = await anyio.to_thread.run_sync(lambda: adp.fetch_changes(ac))
 
     # استطلاع تلقائي بلا جديد: نلمس آخر مزامنة ونخرج بلا مهمّة فارغة في السجلّ.
-    if not events and trigger == "scheduled" and not initial:
+    if not events and trigger in ("scheduled", "webhook") and not initial:
         await db.execute(
-            "update pos_connections set last_sync_at=now(), last_success_at=now(), cursor=$2, updated_at=now() where id=$1 and org_id=$3",
+            "update pos_connections set last_sync_at=now(), last_success_at=now(), last_error=null, cursor=$2, updated_at=now() where id=$1 and org_id=$3 and status<>'disconnected'",
             connection_id, next_cursor, org_id)
         return {"job_id": None, "status": "success", "imported": 0, "updated": 0, "skipped": 0, "failed": 0}
 
@@ -436,7 +436,8 @@ async def run_sync(org_id: str, user_id: str | None, connection: dict,
         job_id, status, counts.as_dict(), next_cursor)
     await db.execute(
         """update pos_connections set
-             status = case when $2='failed' then 'error' else 'connected' end,
+             -- A connection disconnected while this sync ran stays disconnected.
+             status = case when status='disconnected' then 'disconnected' when $2='failed' then 'error' else 'connected' end,
              cursor=$3, last_sync_at=$4,
              last_success_at = case when $2 <> 'failed' then $4 else last_success_at end,
              last_error = case when $2='failed' then $5 else null end,
