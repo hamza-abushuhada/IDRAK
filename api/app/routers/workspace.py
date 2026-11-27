@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from .. import db
 from ..auth import Ctx, require
 from ..services import insights as I
+from ..services import salesnet as N
 
 router = APIRouter(prefix="/ws", tags=["workspace"])
 
@@ -56,9 +57,10 @@ async def sale(sale_id: str, ctx: Ctx = Depends(require("view_sales"))):
 @router.get("/products")
 async def products(q: str | None = None, category_id: str | None = None, filter: str | None = None, ctx: Ctx = Depends(require("view_sales"))):
     end = await I.data_end(ctx.org_id)
-    rows = await db.fetch("""
-        with sold as (select si.product_id, sum(si.quantity) q30, sum(si.line_total) rev30, sum(si.line_total - si.unit_cost*si.quantity) gp30
-                      from sale_items si join sales s on s.id=si.sale_id where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 30 group by 1),
+    rows = await db.fetch(f"""
+        with sold as (select si.product_id, sum(si.quantity*{N.SIGN}) q30, sum(si.line_total*{N.SIGN}) rev30,
+                             sum((si.line_total - si.unit_cost*si.quantity)*{N.SIGN}) gp30
+                      from sale_items si join sales s on s.id=si.sale_id where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 30 group by 1),
              st as (select product_id, sum(quantity) stock from inventory_levels where org_id=$1 group by 1),
              ex as (select product_id, min(expiry_date) next_expiry from inventory_batches where org_id=$1 and quantity > 0 group by 1)
         select p.id, p.sku, p.barcode, p.name, p.name_ar, p.brand, p.size, p.cost, p.price, p.tax_rate, p.reorder_level, p.is_perishable, p.is_active,
@@ -98,8 +100,9 @@ async def product(pid: str, ctx: Ctx = Depends(require("view_sales"))):
         raise HTTPException(404)
     p["stock"] = await db.fetch("""select b.name branch, b.name_ar branch_ar, il.quantity from inventory_levels il join branches b on b.id=il.branch_id where il.product_id=$1""", pid)
     p["batches"] = await db.fetch("""select b.name branch, ib.quantity, ib.expiry_date from inventory_batches ib join branches b on b.id=ib.branch_id where ib.product_id=$1 order by expiry_date""", pid)
-    p["weekly"] = await db.fetch("""select date_trunc('week', amman_date(s.sold_at))::date w, sum(si.quantity) q, sum(si.line_total) rev, avg(si.unit_cost) cost, avg(si.unit_price) price
-        from sale_items si join sales s on s.id=si.sale_id where si.product_id=$1 and s.status='completed' group by 1 order by 1""", pid)
+    p["weekly"] = await db.fetch(f"""select date_trunc('week', amman_date(s.sold_at))::date w, sum(si.quantity*{N.SIGN}) q, sum(si.line_total*{N.SIGN}) rev,
+        avg(si.unit_cost) filter (where s.status='completed') cost, avg(si.unit_price) filter (where s.status='completed') price
+        from sale_items si join sales s on s.id=si.sale_id where si.product_id=$1 and {N.COUNTED} group by 1 order by 1""", pid)
     p["aliases"] = await db.fetch("select alias, source from product_aliases where product_id=$1", pid)
     p["forecast"] = await I.forecast(ctx.org_id, product_id=pid, horizon=60)
     return p
@@ -142,10 +145,11 @@ async def customer(cid: str, ctx: Ctx = Depends(require("view_sales"))):
         raise HTTPException(404)
     c["sales"] = await db.fetch("""select s.id, s.invoice_number, s.sold_at, s.total, b.name branch from sales s left join branches b on b.id=s.branch_id
         where s.customer_id=$1 and s.status='completed' order by s.sold_at desc limit 50""", cid)
-    c["favorites"] = await db.fetch("""select p.name, p.name_ar, sum(si.quantity) q, sum(si.line_total) rev from sale_items si join sales s on s.id=si.sale_id
-        join products p on p.id=si.product_id where s.customer_id=$1 and s.status='completed' group by 1,2 order by q desc limit 8""", cid)
-    c["monthly"] = await db.fetch("""select to_char(date_trunc('month', amman_date(sold_at)),'YYYY-MM') m, sum(total) rev, count(*) n from sales
-        where customer_id=$1 and status='completed' group by 1 order by 1""", cid)
+    c["favorites"] = await db.fetch(f"""select p.name, p.name_ar, sum(si.quantity*{N.SIGN}) q, sum(si.line_total*{N.SIGN}) rev from sale_items si join sales s on s.id=si.sale_id
+        join products p on p.id=si.product_id where s.customer_id=$1 and {N.COUNTED} group by 1,2 order by q desc limit 8""", cid)
+    c["monthly"] = await db.fetch(f"""select to_char(date_trunc('month', amman_date(s.sold_at)),'YYYY-MM') m, sum(s.total*{N.SIGN}) rev,
+        count(*) filter (where s.status='completed') n from sales s
+        where s.customer_id=$1 and {N.COUNTED} group by 1 order by 1""", cid)
     return c
 
 
@@ -179,23 +183,23 @@ async def employees(days: int = 30, ctx: Ctx = Depends(require("view_sales"))):
 @router.get("/branches")
 async def branches(ctx: Ctx = Depends(require("view_sales"))):
     end = await I.data_end(ctx.org_id)
-    rows = await db.fetch("""
+    rows = await db.fetch(f"""
         select b.id, b.name, b.name_ar, b.city, b.area, b.lat, b.lng, b.opened_at,
-          coalesce(sum(s.total) filter (where amman_date(s.sold_at) > $2::date - 30),0) revenue30,
-          count(s.*) filter (where amman_date(s.sold_at) > $2::date - 30) tx30,
-          coalesce(sum(s.total) filter (where amman_date(s.sold_at) between $2::date - 60 and $2::date - 31),0) prev30,
-          coalesce(sum(s.discount) filter (where amman_date(s.sold_at) > $2::date - 30),0) disc30,
+          coalesce(sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) > $2::date - 30),0) revenue30,
+          count(s.*) filter (where s.status='completed' and amman_date(s.sold_at) > $2::date - 30) tx30,
+          coalesce(sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) between $2::date - 60 and $2::date - 31),0) prev30,
+          coalesce(sum(s.discount) filter (where s.status='completed' and amman_date(s.sold_at) > $2::date - 30),0) disc30,
           (select count(*) from employees e where e.branch_id=b.id) staff,
           (select coalesce(sum(il.quantity*p.cost),0) from inventory_levels il join products p on p.id=il.product_id where il.branch_id=b.id) stock_value
-        from branches b left join sales s on s.branch_id=b.id and s.status='completed' and amman_date(s.sold_at) > $2::date - 60
+        from branches b left join sales s on s.branch_id=b.id and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 60
         where b.org_id=$1 group by b.id order by revenue30 desc""", ctx.org_id, end)
     for r in rows:
         r["basket"] = round(r["revenue30"] / r["tx30"], 3) if r["tx30"] else 0
         r["growth"] = round(100 * (r["revenue30"] - r["prev30"]) / r["prev30"], 1) if r["prev30"] else None
-        r["margin"] = await db.fetchval("""select round(sum(si.line_total - si.unit_cost*si.quantity)/nullif(sum(si.line_total),0)*100,1) from sale_items si
-            join sales s on s.id=si.sale_id where s.branch_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 30""", r["id"], end)
-    trend = await db.fetch("""select b.name, date_trunc('week', amman_date(s.sold_at))::date w, sum(s.total) rev from sales s join branches b on b.id=s.branch_id
-        where s.org_id=$1 and s.status='completed' and amman_date(s.sold_at) > $2::date - 120 group by 1,2 order by 2""", ctx.org_id, end)
+        r["margin"] = await db.fetchval(f"""select round(sum((si.line_total - si.unit_cost*si.quantity)*{N.SIGN})/nullif(sum(si.line_total*{N.SIGN}),0)*100,1) from sale_items si
+            join sales s on s.id=si.sale_id where s.branch_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 30""", r["id"], end)
+    trend = await db.fetch(f"""select b.name, date_trunc('week', amman_date(s.sold_at))::date w, sum(s.total*{N.SIGN}) rev from sales s join branches b on b.id=s.branch_id
+        where s.org_id=$1 and {N.COUNTED} and amman_date(s.sold_at) > $2::date - 120 group by 1,2 order by 2""", ctx.org_id, end)
     return {"items": rows, "trend": trend}
 
 

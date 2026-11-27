@@ -15,7 +15,9 @@ account_id + order.external_id (مستقلّة عن connection_id)، فإعاد�
 
 قرار الحالات المالية:
   completed → بيع (sale)            | يُحتسب إيراداً + مخزون.
-  refunded  → مرتجع (refund)        | يعكس الإيراد + يعيد المخزون.
+  refunded  → مستند مرتجع منفصل     | external_id = '<order>:refund'؛ الفاتورة الأصلية تبقى مكتملة،
+                                       والتقارير تخصم المستند من الصافي (salesnet). (المرتجعات
+                                       القديمة التي غيّرت الفاتورة الأصلية نفسها تُحسب صفرًا صافيًا.)
   pending   → لا يُنشأ بيع            | لا إيراد (ينتظر حتى يكتمل أو يُلغى).
   cancelled → لا شيء (من pending)    | لا إيراد.
 المخزون من أحداث inventory.updated (on_hand مطلق) فهو مرجع المختبر؛ لذلك
@@ -57,10 +59,14 @@ def map_payload(payload: dict, branch: str = DEFAULT_BRANCH) -> "model.Event | N
         status = order.get("status")
         external_id = order.get("external_id")
         rev = str(order.get("revision", "1"))
+        invoice = external_id
         if status == "completed":
             ev_type, sale_status = model.EVENT_SALE, "completed"
         elif status == "refunded":
+            # A separate return document (same invoice number), never a rewrite of the
+            # original sale: the original stays completed and net = sale - return.
             ev_type, sale_status = model.EVENT_REFUND, "returned"
+            external_id = f"{external_id}:refund"
         else:  # pending / cancelled: لا يُنشأ بيع
             return None
         lines = []
@@ -71,7 +77,7 @@ def map_payload(payload: dict, branch: str = DEFAULT_BRANCH) -> "model.Event | N
                 unit_price=Decimal(str(it.get("unit_price", "0"))),
                 unit_cost=Decimal("0")))  # المختبر لا يرسل التكلفة
         sale = model.Sale(
-            external_id=external_id, invoice_number=external_id,
+            external_id=external_id, invoice_number=invoice,
             occurred_at=_norm_ts(order.get("updated_at") or payload.get("occurred_at") or ""),
             lines=lines, branch=branch, cashier=None,
             payment_method=_PAYMENT_MAP.get(order.get("payment_method"), "cash"),

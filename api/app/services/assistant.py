@@ -123,7 +123,7 @@ SCHEMA_DOC = """Read-only views/tables you can query (PostgreSQL). Row-level sec
 - v_purchases(po_number, ordered_at, received_at, status, supplier, branch, product, quantity, unit_cost, line_total)
 - branches(id, name, name_ar, city, area), employees(id, branch_id, full_name, full_name_ar, job_title, monthly_salary), customers(id, full_name, full_name_ar, phone, area, loyalty_points, first_seen),
   suppliers(id, name, name_ar, contact_name, phone, email, payment_terms_days), categories(id, name, name_ar), inventory_batches(branch_id, product_id, quantity, expiry_date), goals(branch_id, period_month, target)
-Rules: only completed sales count as revenue (status='completed'). Money is JOD with 3 decimals. Use sale_date for calendar days (Amman time).
+Rules: status='returned' rows are separate return documents; net sales = sum(total) of completed minus sum(total) of returned (void never counts). Say 'gross' when using completed only. Money is JOD with 3 decimals. Use sale_date for calendar days (Amman time).
 The latest day with data is {end}. "Today"/"yesterday"/"this month" are relative to {end}."""
 
 SYSTEM = """You are **Idrak** (إدراك), the built-in AI analyst of the Idrak app for the business "{org}" ({industry}, {city}, Jordan).

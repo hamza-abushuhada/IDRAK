@@ -63,6 +63,9 @@ class TestMapPayload(unittest.TestCase):
         ev = lab.map_payload(_sale_payload("refunded", rev=2))
         self.assertEqual(ev.type, EVENT_REFUND)
         self.assertEqual(ev.payload.status, "returned")
+        # A separate return document: the original sale (same invoice) is never rewritten.
+        self.assertTrue(ev.external_id.endswith(":refund"))
+        self.assertEqual(ev.payload.invoice_number, ev.external_id[:-len(":refund")])
         self.assertEqual(ev.version_key(), "2")
 
     def test_payment_method_mapping(self):
