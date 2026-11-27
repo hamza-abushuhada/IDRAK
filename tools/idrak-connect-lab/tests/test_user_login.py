@@ -198,6 +198,60 @@ class UserLoginTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn('code', r.json())
 
+    def cashier(self):
+        owner = self.owner(self.a)
+        token = owner.post('/api/team/invite', json={'email': 'cashier@example.org', 'role': 'cashier'}, headers=self.O).json()['token']
+        c, r = self.activate(token, CASHIER_PW)
+        self.assertEqual(r.status_code, 200)
+        return owner, c
+
+    def test_no_owner_markup_sent_to_cashier(self):
+        """No authorization UI flash: the role is decided in the HTML the server sends."""
+        owner, cashier = self.cashier()
+        html = cashier.get('/pos').text
+        self.assertIn('data-role="cashier"', html)
+        for owner_only in ('data-owner', 'href="/admin"', 'href="/shop"', '/simulator/', 'إدارة الطلبات'):
+            self.assertNotIn(owner_only, html, owner_only)
+        own = owner.get('/pos').text
+        self.assertIn('data-role="owner"', own)
+        self.assertIn('data-owner', own)
+        self.assertIn('href="/admin"', own)
+        self.assertIn('data-role="none"', self.client().get('/login').text)
+        css = (Path(lab.ROOT) / 'public/style.css').read_text(encoding='utf-8')
+        self.assertIn('[data-owner]{display:none!important}', css, 'owner UI hidden by default')
+        js = (Path(lab.ROOT) / 'public/app.js').read_text(encoding='utf-8')
+        self.assertIn("document.documentElement.dataset.role==='owner'&&session.role==='owner'", js, 'JS fails closed')
+
+    def test_render_html_roles(self):
+        page = '<html lang="ar" dir="rtl"><a href="/pos">P</a><a href="/admin" data-owner>A</a>'
+        cases = {lab.Principal('shop', 's', role='cashier', user_id='u'): ('cashier', False),
+                 lab.Principal('shop', 's', role='owner', user_id='u'): ('owner', True),
+                 lab.Principal('shop', 's'): ('owner', True), lab.Principal('operator'): ('owner', True),
+                 lab.Principal('anonymous'): ('none', False), None: ('none', False)}
+        for principal, (role, has_owner) in cases.items():
+            out = lab.render_html(page, principal)
+            self.assertIn(f'data-role="{role}"', out); self.assertEqual('data-owner' in out, has_owner, principal)
+            self.assertIn('href="/pos"', out)
+
+    def test_server_enforces_every_owner_action_for_cashier(self):
+        _, c = self.cashier()
+        gets = ('/api/team', '/api/events', '/simulator/api/summary', '/simulator/api/synced-orders',
+                '/simulator/api/received-events', '/api/shops')
+        posts = (('/api/web/orders', {'items': [{'sku': 'BRG-001', 'quantity': 1}]}), ('/api/orders/POS-000001/status', {'status': 'cancelled'}),
+                 ('/api/pairing-codes', {'intent': 'x.y'}), ('/api/team/invite', {'email': 'y@example.org'}),
+                 ('/api/team/remove', {'user_id': 'usr-x'}), ('/api/retry', {}), ('/api/redeliver', {'seq': 1}),
+                 ('/api/shops', {'name': 'x'}), ('/api/shops/invite', {'shop_id': self.b['shop_id'], 'email': 'z@example.org'}),
+                 ('/api/shops/rotate-token', {'shop_id': self.a['shop_id']}))
+        for path in gets:
+            self.assertEqual(c.get(path).status_code, 403, path)
+        for path, body in posts:
+            self.assertEqual(c.post(path, json=body, headers=self.O).status_code, 403, path)
+        for page in ('/', '/operator', '/shop', '/admin', '/simulator', '/simulator/'):
+            self.assertEqual(c.get(page, follow_redirects=False).headers.get('location'), '/pos', page)
+        # Still allowed: selling and reading its own shop's products and orders.
+        self.assertEqual(c.post('/api/pos/sales', json={'items': [{'sku': 'BRG-001', 'quantity': 1}], 'payment_method': 'cash'}, headers=self.O).status_code, 200)
+        self.assertEqual(len(c.get('/api/orders').json()['orders']), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
