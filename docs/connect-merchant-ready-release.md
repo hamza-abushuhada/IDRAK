@@ -16,7 +16,12 @@ Status: **verified on Staging; NOT yet applied to production.**
    - `api/db/migrations/014_connect_remove_and_store_keys.sql` to Supabase. It adds the `removed_at` column, a trigger that clears it on reconnect, and two new tables. No existing row changes.
    - `tools/idrak-connect-lab/serverless_migration_api_keys.sql` to the published Lab DB. It adds one new table.
 3. Merge PR #43, then deploy API and web with `deploy_idrak1.py` (skip-domain, then promote). Deploy the published Lab from a clean export.
+   Order matters: apply the Lab migration **before** deploying the Lab. Otherwise "API keys" in the Lab fails until the table exists.
 4. Leave `IDRAK_STORE_API_KEYS` **unset** on production. Users see the catalog and Remove; API keys stay hidden.
+   - The API deploy also registers a **daily** Vercel Cron (`/integrations/cron/store-catch-up`); Hobby allows at most daily.
+   - Add `CRON_SECRET` (≥32 characters) to the production API in the same step. Without it the cron gets 401 (harmless). With the flag off it does nothing.
+   - The published Lab already has `IDRAK_CONNECT_NOTIFY_URL`, verified by name on 2026-11-27.
+   - Logos: Loyverse, Foodics, Odoo and Lightspeed ship (sources in `docs/brand-logos.md`). Shopify and Square show initials until the owner decides.
 5. To enable API keys later:
    - add `IDRAK_STORE_API_KEYS=on` (production API only), then redeploy;
    - the published Lab must have `IDRAK_CONNECT_NOTIFY_URL` set to the production notify address for automatic arrival. Without it, sync still works through catch-up and "Sync now".
