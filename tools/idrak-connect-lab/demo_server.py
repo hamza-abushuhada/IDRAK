@@ -247,6 +247,8 @@ def init_db():
         db.executescript(pairing.DDL)
         import lab_users
         db.executescript(lab_users.DDL)
+        import api_keys
+        db.executescript(api_keys.DDL)
     with connect(RECEIVER_DB) as db:
         db.executescript('PRAGMA journal_mode=WAL;' + RECEIVER_DDL)
 
@@ -325,6 +327,9 @@ def authenticate(authorization, path, method, operator_header):
     if authorization.startswith('Bearer lc.'):
         from pairing import integration_principal
         return integration_principal(authorization, path, method)
+    if authorization.startswith('Bearer lsk_'):
+        import api_keys  # store API key: one shop, read-only routes only
+        return api_keys.principal(authorization, path, method)
     if authorization and hmac.compare_digest(authorization.encode(), operator_header.encode()):
         return Principal('operator')
     if (path.startswith('/api/') or path.startswith('/simulator/api/')) and not path.startswith('/api/shops'):
@@ -482,8 +487,12 @@ def create_order(shop, channel, req):
     return {'order_id':external_id, 'total':money(total),'status':status}
 
 def notify_idrak(shop, channel):
-    """After the sale is committed and no DB connection is held: signal IDRAK if this shop is linked."""
+    """After the sale is committed and no DB connection is held: signal IDRAK if this shop is linked.
+    When the web entrypoint deferred notifications for this request, they are queued and sent
+    after the response, so an order never waits for (or fails because of) IDRAK."""
     import idrak_notify
+    if idrak_notify.defer(shop, channel):
+        return
     idrak_notify.notify(shop, channel)
 
 def change_order(shop, external_id, status):
@@ -627,7 +636,14 @@ def handle_source_get(principal,x_shop,path,q):
     if path=='/health':return source_get(None,path,q)
     if path=='/api/shops':
         require_operator(principal);return list_shops()
+    import api_keys
+    if path=='/api/v1/store':
+        if not api_keys.is_api_key(principal):raise LabAuthError(403,'Store API key required')
+        return api_keys.store_info(principal)
+    if api_keys.is_api_key(principal) and path!='/api/web/events':raise LabAuthError(403,'Not allowed for API keys')
     if path not in CASHIER_GET:require_owner(principal)
+    if path=='/api/keys':
+        return api_keys.list_keys(principal,effective_shop(principal,x_shop))
     shop=effective_shop(principal,x_shop)
     if path=='/api/team':
         import lab_users;return lab_users.team(shop)
@@ -637,6 +653,14 @@ def handle_source_post(principal,x_shop,path,req):
     if path in ('/api/connect/context','/api/connect/approve'):
         import connect_flow  # checks ownership of the chosen shop itself
         return connect_flow.handle(principal,path,req)
+    import api_keys
+    if path=='/api/v1/notifications':
+        if not api_keys.is_api_key(principal):raise LabAuthError(403,'Store API key required')
+        return api_keys.notifications(principal,req)
+    if api_keys.is_api_key(principal):raise LabAuthError(403,'Not allowed for API keys')
+    if path in ('/api/keys','/api/keys/revoke','/api/keys/rotate'):
+        shop=effective_shop(principal,x_shop)
+        return {'/api/keys':api_keys.create,'/api/keys/revoke':api_keys.revoke,'/api/keys/rotate':api_keys.rotate}[path](principal,shop,req)
     if path not in CASHIER_POST and principal.kind!='integration':require_owner(principal)
     if path=='/api/shops/invite':
         import lab_users

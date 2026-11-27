@@ -7,6 +7,7 @@ from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 import psycopg
 
@@ -111,8 +112,13 @@ async def dispatch(path: str, request: Request):
             if cookie is not None:
                 response.headers['Set-Cookie'] = browser_auth.cookie_header(cookie, request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
             return response
-        return JSONResponse(await run_in_threadpool(
-            lab.handle_source_post, request.state.principal, request.headers.get('x-lab-shop'), '/' + path, value))
+        # The order is saved inside handle_source_post; IDRAK notifications are queued and
+        # sent after the response, so a slow or unreachable IDRAK never delays or fails a sale.
+        import idrak_notify
+        queue = idrak_notify.start_deferring()
+        result = await run_in_threadpool(
+            lab.handle_source_post, request.state.principal, request.headers.get('x-lab-shop'), '/' + path, value)
+        return JSONResponse(result, background=BackgroundTask(idrak_notify.flush, list(queue)) if queue else None)
     except lab.LabAuthError as exc:
         return JSONResponse({'error': str(exc)}, status_code=exc.status)
     except LookupError:

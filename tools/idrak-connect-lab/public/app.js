@@ -37,12 +37,60 @@ fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
   }
   if(session.email){const who=document.createElement('span');who.className='pill who';who.dir='ltr';who.textContent=session.email+' · '+(owner?'صاحب المحل':'كاشير');nav?.append(who);}
   if(session.kind==='shop'){
-    if(owner){if(new URLSearchParams(location.search).get('pairing')==='manual')setupPairing(session, nav);if(session.via==='password')setupTeam(nav);}
+    if(owner){if(new URLSearchParams(location.search).get('pairing')==='manual')setupPairing(session, nav);if(session.via==='password')setupTeam(nav);setupApiKeys(nav);}
     const button=document.createElement('button');button.className='btn secondary small';button.textContent='تسجيل الخروج';
     button.onclick=async()=>{await fetch('/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});location.replace('/login');};
     nav?.append(button);
   }
 }).catch(()=>{});
+
+function setupApiKeys(nav){
+  const open=document.createElement('button');open.type='button';open.className='btn secondary small';open.textContent='مفاتيح API';nav?.append(open);
+  const dialog=document.createElement('dialog');dialog.className='pairing-dialog';dialog.setAttribute('aria-labelledby','keys-title');document.body.append(dialog);
+  const when=(v)=>v?new Date(typeof v==='number'?v*1000:v).toLocaleDateString('ar-JO'):'—';
+  const state={active:'فعّال',expired:'منتهي الصلاحية',revoked:'ملغى'};
+  function showKey(key){
+    const box=dialog.querySelector('#keys-new');box.hidden=false;
+    const input=dialog.querySelector('#keys-value');input.value=key;input.focus();input.select();
+  }
+  async function draw(){
+    dialog.innerHTML=`<div class="row"><h2 id="keys-title">مفاتيح API للمتجر الإلكتروني</h2><button class="btn secondary small" type="button" id="keys-close">إغلاق</button></div>
+      <p class="muted">المفتاح يسمح بقراءة طلبات هذا المتجر الإلكتروني فقط (قراءة فقط)، ولا يصل إلى الكاشير أو أي متجر آخر. يظهر المفتاح مرة واحدة عند إنشائه، فانسخه واحفظه في مكان آمن.</p>
+      <div class="form-field"><label for="keys-url">عنوان المتجر (للصقه في إدراك)</label><input id="keys-url" dir="ltr" readonly value="${esc(location.origin)}"></div>
+      <form id="keys-form"><div class="form-field"><label for="keys-name">اسم المفتاح</label><input id="keys-name" maxlength="60" value="IDRAK" required></div>
+      <div class="form-field"><label for="keys-exp">مدة الصلاحية</label><select id="keys-exp"><option value="30">30 يومًا</option><option value="90" selected>90 يومًا</option><option value="365">سنة</option><option value="none">بدون انتهاء</option></select></div>
+      <button class="btn" type="submit">إنشاء مفتاح</button></form>
+      <div id="keys-new" hidden><label for="keys-value">المفتاح الجديد (يظهر مرة واحدة فقط)</label><input id="keys-value" dir="ltr" readonly autocomplete="off" spellcheck="false"><button class="btn secondary" type="button" id="keys-copy">نسخ المفتاح</button><p class="muted">لن تتمكن من رؤية هذا المفتاح مرة أخرى بعد إغلاق النافذة.</p></div>
+      <p id="keys-error" role="alert"></p><h3>المفاتيح</h3><div id="keys-list" class="list"></div>`;
+    dialog.querySelector('#keys-close').onclick=()=>dialog.close();
+    dialog.querySelector('#keys-form').onsubmit=async e=>{
+      e.preventDefault();dialog.querySelector('#keys-error').textContent='';
+      const exp=dialog.querySelector('#keys-exp').value;
+      try{const r=await api('/api/keys',{method:'POST',body:JSON.stringify({name:dialog.querySelector('#keys-name').value.trim(),expires_in_days:exp==='none'?null:Number(exp)})});
+        showKey(r.key);await list();}
+      catch(err){dialog.querySelector('#keys-error').textContent=err.message;}
+    };
+    dialog.querySelector('#keys-copy').onclick=async()=>{const v=dialog.querySelector('#keys-value');try{await navigator.clipboard.writeText(v.value);toast('نُسخ المفتاح');}catch{v.select();}};
+    await list();
+  }
+  async function list(){
+    const node=dialog.querySelector('#keys-list');
+    try{const t=await api('/api/keys');
+      node.innerHTML=t.keys.map(k=>`<div class="order"><div><h3>${esc(k.name)} <span class="pill" dir="ltr">${esc(k.prefix)}</span></h3>
+        <p>${state[k.status]||esc(k.status)} · أُنشئ ${when(k.created_at)} · ينتهي ${k.expires_at?when(k.expires_at):'بدون انتهاء'} · آخر استخدام ${when(k.last_used_at)}${k.notifications?' · إشعارات مفعّلة':''}</p></div>
+        ${k.status==='active'?`<div><button class="btn secondary small" data-rotate="${esc(k.key_id)}">تدوير</button> <button class="btn secondary small" data-revoke="${esc(k.key_id)}">إلغاء</button></div>`:''}</div>`).join('')||'<div class="empty">لا توجد مفاتيح بعد</div>';
+      node.querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
+        if(!confirm('إلغاء هذا المفتاح؟ سيتوقف أي نظام يستخدمه عن قراءة طلبات المتجر فورًا.'))return;
+        try{await api('/api/keys/revoke',{method:'POST',body:JSON.stringify({key_id:b.dataset.revoke})});toast('تم إلغاء المفتاح');await list();}catch(err){toast(err.message,true);}});
+      node.querySelectorAll('[data-rotate]').forEach(b=>b.onclick=async()=>{
+        if(!confirm('تدوير المفتاح؟ يُلغى المفتاح الحالي فورًا ويُنشأ مفتاح جديد بالصلاحيات نفسها، وعليك إدخاله في إدراك.'))return;
+        try{const r=await api('/api/keys/rotate',{method:'POST',body:JSON.stringify({key_id:b.dataset.rotate})});showKey(r.key);await list();}catch(err){toast(err.message,true);}});
+    }catch(err){node.textContent=err.message;}
+  }
+  // The key never stays in the page after the dialog closes.
+  dialog.addEventListener('close',()=>dialog.replaceChildren());
+  open.onclick=()=>{dialog.showModal();draw();};
+}
 
 function setupTeam(nav){
   const open=document.createElement('button');open.type='button';open.className='btn secondary small';open.textContent='الفريق';nav?.append(open);

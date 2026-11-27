@@ -6,5 +6,8 @@
     "**": {
       "maxDuration": 300
     }
-  }
+  },
+  "crons": [
+    { "path": "/integrations/cron/store-catch-up", "schedule": "15 3 * * *" }
+  ]
 }

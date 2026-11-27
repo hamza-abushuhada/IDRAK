@@ -1,0 +1,45 @@
+# IDRAK Connect: merchant-ready release (PR #43): production plan
+
+Status: **verified on Staging; NOT yet applied to production.**
+
+## What changes for users
+| Area | Production behavior after release | Gated? |
+|---|---|---|
+| Connect a new system: POS | Loyverse "Available now" (logo); Foodics, Odoo POS, Shopify POS, Square POS, Lightspeed POS "Coming soon" (display only) | no |
+| Demo POS | No longer offered for new links. Existing Demo connections, data and reconnect are unchanged | no |
+| Remove system | New, with explicit confirmation; distinct from Disconnect; keeps all invoices, returns, history and audit; re-linking has no duplicates | no |
+| Online store via API key | IDRAK Connect Lab store only | **`IDRAK_STORE_API_KEYS=on`** (off = hidden) |
+
+## Steps (each needs the owner's go-ahead)
+1. Back up and restore-verify Supabase production (`backup_verify.py supabase`) and the published Lab DB (`backup_verify.py lab`).
+2. Apply the additive migrations:
+   - `api/db/migrations/014_connect_remove_and_store_keys.sql` to Supabase. It adds the `removed_at` column, a trigger that clears it on reconnect, and two new tables. No existing row changes.
+   - `tools/idrak-connect-lab/serverless_migration_api_keys.sql` to the published Lab DB. It adds one new table.
+3. Merge PR #43, then deploy API and web with `deploy_idrak1.py` (skip-domain, then promote). Deploy the published Lab from a clean export.
+   Order matters: apply the Lab migration **before** deploying the Lab. Otherwise "API keys" in the Lab fails until the table exists.
+4. Leave `IDRAK_STORE_API_KEYS` **unset** on production. Users see the catalog and Remove; API keys stay hidden.
+   - The API deploy also registers a **daily** Vercel Cron (`/integrations/cron/store-catch-up`); Hobby allows at most daily.
+   - Add `CRON_SECRET` (≥32 characters) to the production API in the same step. Without it the cron gets 401 (harmless). With the flag off it does nothing.
+   - The published Lab already has `IDRAK_CONNECT_NOTIFY_URL`, verified by name on 2026-11-27.
+   - Logos: Loyverse, Foodics, Odoo and Lightspeed ship (sources in `docs/brand-logos.md`). Shopify and Square show initials until the owner decides.
+5. To enable API keys later:
+   - add `IDRAK_STORE_API_KEYS=on` (production API only), then redeploy;
+   - the published Lab must have `IDRAK_CONNECT_NOTIFY_URL` set to the production notify address for automatic arrival. Without it, sync still works through catch-up and "Sync now".
+
+## Fixed after the final review (commit ebdd2f4)
+- **Permanent delete closed:** `DELETE /integrations/connections/{id}` refuses any `purge` parameter (403, audited). This applies to every role, and no hard-delete code remains on that path.
+- **Lab orders never wait for IDRAK:**
+  - notifications are sent after the response;
+  - API-key notifications: 5 s cap, one attempt;
+  - one active subscription per store;
+  - approval-link notifications unchanged (20 s and one retry), now also sent after the response.
+
+## Rollback
+- **App:** promote the previous deployments. Record their IDs at release time in `previous-deployments.json`.
+- **API keys only:** remove the flag and redeploy, or roll back the API. Linked stores then stop syncing; their data stays.
+- **Migrations:** these can stay. They are additive and unused by older code. The trigger only clears `removed_at`.
+- **Data:** nothing is deleted or rewritten by this release, so no data restore is expected. Restore-verified backups from step 1 are the last resort.
+
+## Not to be used for tests in production
+- the real Loyverse connection of branch "central";
+- real merchant connections or keys.

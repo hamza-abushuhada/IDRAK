@@ -108,14 +108,23 @@ async def _adapter_for(connection, org_id):
         from . import loyverse, loyverse_oauth
         token = await loyverse_oauth.access_token(connection, org_id)
         return loyverse.LoyverseAdapter(token, connection.get('config') or {})
+    if connection['provider_code'] == 'lab_web' and (connection.get('config') or {}).get('store_api_key'):
+        from . import store_key
+        creds = await store_key.load_credentials(connection, org_id)
+        return store_key.LabStoreKeyAdapter(creds, branch=(connection.get('config') or {}).get('branch_name') or ('Lab ' + connection['account_ref']))
     if connection['provider_code'] in ('lab_pos', 'lab_web') and (connection.get('config') or {}).get('paired_lab'):
         from .pairing import load_credentials
         connection = {**connection, '_lab_credentials': await load_credentials(connection, org_id)}
     return build_adapter(connection, org_id)
 
 
+def _lab_shop(cfg) -> bool:
+    """A Lab shop linked with its owner's consent: by approval (paired) or by store API key."""
+    return bool(cfg.get('paired_lab') or cfg.get('store_api_key'))
+
+
 async def _lock_paired_source(c, connection, org_id):
-    if (connection.get('config') or {}).get('paired_lab'):
+    if _lab_shop(connection.get('config') or {}):
         # Both channels resolve shared organization products. Serialize them
         # together, including two shops belonging to the same organization.
         identity = f"lab-events:{org_id}"
@@ -390,7 +399,7 @@ def _proc_ctx(connection: dict, org_id: str) -> dict:
     cfg = connection.get("config") or {}
     return {"org_id": org_id, "connection_id": str(connection["id"]), "provider_code": provider_code,
             "account_ref": connection.get("account_ref") or "default",
-            "paired_lab": bool(cfg.get('paired_lab')),
+            "paired_lab": _lab_shop(cfg),
             "channel": cfg.get("channel") or _default_channel(provider_code),
             "adjust_inv": bool(cfg.get("sales_adjust_inventory", True)),
             "caches": {"branch": {}, "emp": {}, "prod": {}}}

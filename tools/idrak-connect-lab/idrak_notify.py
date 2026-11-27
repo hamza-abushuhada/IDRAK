@@ -24,8 +24,39 @@ import demo_server as lab
 
 log = logging.getLogger(__name__)
 PATH = '/integrations/lab/notify'
-TIMEOUT = 20
+TIMEOUT = 20            # approval-link (paired) notifications: unchanged behavior
+STORE_KEY_TIMEOUT = 5   # API-key notifications: at most 5 s, one attempt (catch-up covers misses)
 SIG_PREFIX = b'idrak-lab-notify:'
+
+# Per-request queue set by the web entrypoint: notifications are sent AFTER the response.
+import contextvars
+_DEFERRED: contextvars.ContextVar = contextvars.ContextVar('idrak_notify_deferred', default=None)
+
+
+def start_deferring():
+    """Called by the web entrypoint before handling a request; returns the queue to flush later."""
+    queue = []
+    _DEFERRED.set(queue)
+    return queue
+
+
+def defer(shop, channel):
+    """Queue (shop, channel) when this request defers notifications; False = send now."""
+    queue = _DEFERRED.get()
+    if queue is None:
+        return False
+    if (shop, channel) not in queue:
+        queue.append((shop, channel))
+    return True
+
+
+def flush(queue):
+    """Send queued notifications (runs after the response). Never raises."""
+    for shop, channel in queue or []:
+        try:
+            notify(shop, channel)
+        except Exception as exc:  # noqa: BLE001
+            log.warning('IDRAK deferred notify error: %s', type(exc).__name__)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -54,8 +85,25 @@ def signature(shop, raw):
     return hmac.new(lab.shop_secret(shop).encode(), SIG_PREFIX + raw, hashlib.sha256).hexdigest()
 
 
+STORE_KEY_PATH = '/integrations/store/notify'
+STORE_SIG_PREFIX = b'idrak-store-notify:'
+
+
+def store_key_body(shop, key_id):
+    return json.dumps({'key_id': key_id, 'shop_id': shop, 'channel': 'web', 'ts': int(time.time()),
+                       'nonce': secrets.token_urlsafe(16)}, separators=(',', ':')).encode()
+
+
+def store_key_signature(key_id, raw):
+    import api_keys
+    return hmac.new(api_keys.notify_secret(key_id).encode(), STORE_SIG_PREFIX + raw, hashlib.sha256).hexdigest()
+
+
 def notify(shop, channel, opener=None):
-    """Best effort, never raises. Returns the HTTP status (or None if not sent)."""
+    """Best effort, never raises. Returns the HTTP status of the paired-shop signal (or None).
+    Online-store changes are also signalled to every API key of the shop that subscribed."""
+    if channel == 'web':
+        notify_store_keys(shop, opener)
     try:
         url = target()
         if not url or channel not in ('pos', 'web'):
@@ -65,24 +113,47 @@ def notify(shop, channel, opener=None):
         if not row:
             return None  # not linked to IDRAK
         raw = body_for(shop, row['org_id'], channel)
-        request = Request(url, data=raw, method='POST', headers={
-            'Content-Type': 'application/json', 'X-Idrak-Signature': signature(shop, raw), 'User-Agent': 'IDRAK-Connect-Lab'})
-        opener = opener or build_opener(_NoRedirect)
-        for attempt in range(2):
-            try:
-                with opener.open(request, timeout=TIMEOUT) as response:
-                    return response.status
-            except HTTPError as exc:
-                if exc.code < 500:
-                    log.warning('IDRAK notify rejected: status=%s', exc.code)
-                    return exc.code
-                status = exc.code
-            except (URLError, TimeoutError, OSError):
-                status = 0
-            if attempt == 0:
-                time.sleep(0.5)
-        log.warning('IDRAK notify failed after retry: status=%s', status)
-        return status
+        return _send(url, raw, signature(shop, raw), opener)
     except Exception as exc:  # noqa: BLE001 - a sale must never fail because of IDRAK
         log.warning('IDRAK notify error: %s', type(exc).__name__)
         return None
+
+
+def notify_store_keys(shop, opener=None):
+    """Signal 'this store changed' for each subscribed API key. No order data is sent;
+    IDRAK pulls the events with the key. Never raises."""
+    statuses = []
+    try:
+        url = target()
+        if not url:
+            return statuses
+        url = url[:-len(PATH)] + STORE_KEY_PATH  # same verified IDRAK host, fixed path
+        import api_keys
+        for key_id in api_keys.subscribers(shop):
+            raw = store_key_body(shop, key_id)
+            statuses.append(_send(url, raw, store_key_signature(key_id, raw), opener, timeout=STORE_KEY_TIMEOUT, attempts=1))
+    except Exception as exc:  # noqa: BLE001
+        log.warning('IDRAK store notify error: %s', type(exc).__name__)
+    return statuses
+
+
+def _send(url, raw, sig, opener=None, timeout=TIMEOUT, attempts=2):
+    request = Request(url, data=raw, method='POST', headers={
+        'Content-Type': 'application/json', 'X-Idrak-Signature': sig, 'User-Agent': 'IDRAK-Connect-Lab'})
+    opener = opener or build_opener(_NoRedirect)
+    status = 0
+    for attempt in range(attempts):
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return response.status
+        except HTTPError as exc:
+            if exc.code < 500:
+                log.warning('IDRAK notify rejected: status=%s', exc.code)
+                return exc.code
+            status = exc.code
+        except (URLError, TimeoutError, OSError):
+            status = 0
+        if attempt + 1 < attempts:
+            time.sleep(0.5)
+    log.warning('IDRAK notify failed after retry: status=%s', status)
+    return status
