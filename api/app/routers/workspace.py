@@ -56,7 +56,7 @@ async def sale(sale_id: str, ctx: Ctx = Depends(require("view_sales"))):
 
 @router.get("/products")
 async def products(q: str | None = None, category_id: str | None = None, filter: str | None = None, ctx: Ctx = Depends(require("view_sales"))):
-    end = await I.data_end(ctx.org_id)
+    end = await I.window_end(ctx.org_id)
     rows = await db.fetch(f"""
         with sold as (select si.product_id, sum(si.quantity*{N.SIGN}) q30, sum(si.line_total*{N.SIGN}) rev30,
                              sum((si.line_total - si.unit_cost*si.quantity)*{N.SIGN}) gp30
@@ -182,7 +182,7 @@ async def employees(days: int = 30, ctx: Ctx = Depends(require("view_sales"))):
 
 @router.get("/branches")
 async def branches(ctx: Ctx = Depends(require("view_sales"))):
-    end = await I.data_end(ctx.org_id)
+    end = await I.window_end(ctx.org_id)
     rows = await db.fetch(f"""
         select b.id, b.name, b.name_ar, b.city, b.area, b.lat, b.lng, b.opened_at,
           coalesce(sum(s.total*{N.SIGN}) filter (where amman_date(s.sold_at) > $2::date - 30),0) revenue30,

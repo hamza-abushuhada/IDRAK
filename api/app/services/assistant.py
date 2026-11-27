@@ -406,7 +406,7 @@ async def chat(org_id: str, user, role: str, message: str, session_id: str | Non
             await emit({"type": "text", "delta": text_out})
             return await _finish(session_id, org_id, text_out, events_log, emit)
 
-    end = await I.data_end(org_id)
+    end = await I.window_end(org_id)
     screens = "\n".join(f"- {p}: {d} [{', '.join(els)}]" for p, (d, els) in SCREENS.items())
     page_elements = (page or {}).get("elements") or elements_for(path)
     system = SYSTEM.format(org=org["name"] + (f" / {org['name_ar']}" if org["name_ar"] else ""), industry=org["industry"], city=org["city"] or "Jordan",

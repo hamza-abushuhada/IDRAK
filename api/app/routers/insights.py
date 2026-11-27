@@ -158,7 +158,7 @@ async def compliance(days: int = 90, ctx: Ctx = Depends(require("view_finance"))
 
 @router.get("/goals")
 async def goals(ctx: Ctx = Depends(require("view_dashboard"))):
-    end = await I.data_end(ctx.org_id)
+    end = await I.window_end(ctx.org_id)
     # b.org_id=g.org_id و s.org_id=g.org_id يمنعان قراءة اسم أو إيرادات فرع
     # لا ينتمي إلى مؤسسة المتصل، حتى لو كان صفّ هدف ملوّث قد خُزّن سابقاً
     # (انظر add_goal أدناه).

@@ -29,7 +29,32 @@ def today() -> dt.date:
     return (dt.datetime.now(dt.timezone(dt.timedelta(hours=3)))).date()
 
 
+# How far back the latest sale may be for a business to count as "live". A business
+# whose only data is an older import keeps its windows anchored to that data.
+ACTIVE_DAYS = 90
+
+
+async def window_end(org_id: str) -> dt.date:
+    """End of the "last N days" windows the user sees (Dashboard, goals, products, branches).
+
+    Live business (any sale in the last ACTIVE_DAYS, or none at all): TODAY in Amman time,
+    so today's sales count even if there were none yesterday. Historical-only data: its
+    last day with sales, so an old import isn't shown as an empty window. Never later than
+    today (future-dated imports don't stretch the window). Custom ranges bypass this.
+    """
+    c = db.cache_get(("window_end", org_id), 60)
+    if c:
+        return c
+    t = today()
+    v = await db.fetchval("select max(amman_date(sold_at)) from sales where org_id=$1 and amman_date(sold_at) <= amman_date(now())", org_id)
+    last = dt.date.fromisoformat(v) if isinstance(v, str) else v
+    end = t if last is None or last >= t - dt.timedelta(days=ACTIVE_DAYS) else last
+    return db.cache_set(("window_end", org_id), end)
+
+
 async def data_end(org_id: str) -> dt.date:
+    """Last COMPLETE day with sales (before today). For forecasts, alerts, reorder and
+    other models that must not read a partial day; not for user-facing windows."""
     c = db.cache_get(("data_end", org_id), 120)
     if c:
         return c
@@ -51,7 +76,7 @@ async def dashboard(org_id: str, days: int = 30, branch_id: str | None = None,
     # نطاق صريح يغلب "آخر N يوم": المالك بيسأل "شو صار بين ١ و ١٥ أيلول؟"
     # ومو لازم نجيبره على 7/30/90. لو انعطى طرف واحد نكمّل الثاني منه.
     if end is None:
-        end = await data_end(org_id)
+        end = await window_end(org_id)
     if start is None:
         start = end - dt.timedelta(days=days - 1)
     if start > end:
