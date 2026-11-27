@@ -56,11 +56,45 @@ def main():
         assert [r.status_code for r in responses].count(200) == 1
         assert [r.status_code for r in responses].count(400) == 3
         before = client.get('/simulator/api/summary', headers=auth).json()
+
+        # ---- multi-shop: two independent shops on the same database ----
+        created = [client.post('/api/shops', json={'name': n}, headers=auth) for n in ('Shop A', 'Shop B')]
+        assert all(r.status_code == 200 for r in created)
+        ta, tb = (r.json() for r in created)
+        ha, hb = ({'Authorization': 'Bearer ' + t['token']} for t in (ta, tb))
+        assert client.get('/api/products', headers=ha).status_code == 200
+        r = client.post('/api/pos/sales', json={'items': [{'sku': 'BRG-001', 'quantity': 5}]}, headers=ha)
+        assert r.status_code == 200 and r.json()['order_id'] == 'POS-000001'
+        r = client.post('/api/pos/sales', json={'items': [{'sku': 'BRG-001', 'quantity': 1}]}, headers=hb)
+        assert r.status_code == 200 and r.json()['order_id'] == 'POS-000001'  # per-shop invoice numbers
+        stock = lambda h: {p['sku']: p['stock'] for p in client.get('/api/products', headers=h).json()['products']}['BRG-001']
+        assert (stock(ha), stock(hb), stock(auth)) == (55, 59, 58), (stock(ha), stock(hb), stock(auth))
+        assert client.get('/simulator/api/summary', headers=ha).json()['revenue'] == '21.250'
+        assert client.get('/simulator/api/summary', headers=hb).json()['revenue'] == '4.250'
+        assert client.get('/simulator/api/summary', headers=auth).json() == before  # legacy shop untouched
+        # unauthorized access attempts
+        assert client.get('/api/products', headers={**ha, 'X-Lab-Shop': tb['shop_id']}).status_code == 403
+        assert client.get('/api/orders', headers={'Authorization': 'Bearer ' + ta['shop_id'] + '.bad'}).status_code == 401
+        assert client.get('/api/shops', headers=ha).status_code == 401
+        assert client.post('/api/shops', json={'name': 'x'}, headers=ha).status_code == 401
+        assert client.get('/pos', headers=ha).status_code == 401
+        assert client.post('/api/orders/POS-000001/status', json={'status': 'refunded'}, headers=hb).status_code == 200
+        assert client.get('/api/orders', headers=ha).json()['orders'][0]['status'] == 'completed'  # A unaffected by B's refund
+        # per-shop stock is independent under concurrency: only one 30-unit sale per shop fits
+        for h in (ha, hb):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                rs = list(pool.map(lambda _: client.post('/api/pos/sales', json={
+                    'items': [{'sku': 'SLD-001', 'quantity': 30}]}, headers=h), range(4)))
+            assert [x.status_code for x in rs].count(200) == 1
+        assert stock(ha) == 55
+        before = client.get('/simulator/api/summary', headers=auth).json()
+        before_a = client.get('/simulator/api/summary', headers=ha).json()
     pg.initialize()
     serverless_app = importlib.reload(serverless_app)  # Simulated fresh invocation/module load.
     with TestClient(serverless_app.app) as client:
         assert client.get('/simulator/api/summary', headers=auth).json() == before
-    print('PASS: PostgreSQL POS/store/refund, authentication, concurrent stock, cold start and setup replay')
+        assert client.get('/simulator/api/summary', headers=ha).json() == before_a
+    print('PASS: PostgreSQL POS/store/refund, two-shop isolation + unauthorized access, concurrent stock, cold start and setup replay')
 
 
 if __name__ == '__main__':

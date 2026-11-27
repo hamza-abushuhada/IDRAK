@@ -22,11 +22,12 @@ app = FastAPI(title='IDRAK Connect Lab — isolated simulator', docs_url=None, r
 
 @app.middleware('http')
 async def authentication(request, call_next):
-    if request.method == 'GET' and request.url.path == '/health':
-        return await call_next(request)
     expected = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
-    if not hmac.compare_digest(request.headers.get('authorization', '').encode(), expected.encode()):
+    principal = await run_in_threadpool(
+        lab.authenticate, request.headers.get('authorization', ''), request.url.path, request.method, expected)
+    if principal is None:
         return Response(status_code=401, headers={'WWW-Authenticate': 'Basic realm="IDRAK Connect Lab", charset="UTF-8"'})
+    request.state.principal = principal
     if request.method == 'POST':
         origin = request.headers.get('origin')
         if origin and origin.rstrip('/') != str(request.base_url).rstrip('/'):
@@ -51,7 +52,7 @@ def static_file(filename):
     return Response(text, media_type=mime)
 
 
-def dispatch_get(path, query):
+def dispatch_get(principal, x_shop, path, query):
     files = {'/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
              '/style.css': 'style.css', '/app.js': 'app.js', '/simulator': 'inbox.html', '/simulator/': 'inbox.html'}
     if path in files:
@@ -61,31 +62,9 @@ def dispatch_get(path, query):
             db.execute('SELECT sku FROM products LIMIT 0')
         return JSONResponse({'ok': True, 'service': 'idrak-lab-postgres'})
     if path.startswith('/simulator/api/'):
-        return JSONResponse(lab.receiver_get(path[len('/simulator'):]))
+        return JSONResponse(lab.handle_receiver_get(principal, x_shop, path[len('/simulator'):]))
     if path.startswith('/api/'):
-        return JSONResponse(lab.source_get(path, query))
-    raise LookupError(path)
-
-
-def dispatch_post(path, body):
-    if path == '/api/pos/sales':
-        return lab.create_order('pos', body)
-    if path == '/api/web/orders':
-        return lab.create_order('web', body)
-    if path.startswith('/api/orders/') and path.endswith('/status'):
-        return lab.change_order(path.split('/')[3], body.get('status'))
-    if path == '/api/retry':
-        lab.flush_events()
-        return {'status': 'retried'}
-    if path == '/api/redeliver':
-        seq = body.get('seq')
-        if type(seq) is not int:
-            raise ValueError('seq must be integer')
-        with lab.connect(lab.SOURCE_DB) as db:
-            row = db.execute('SELECT payload FROM source_events WHERE seq=?', (seq,)).fetchone()
-        if not row:
-            raise ValueError('event not found')
-        return {'receiver': deliver_to_simulator(f'http://127.0.0.1:{lab.RECEIVER_PORT}/ingest', json.loads(row['payload']))}
+        return JSONResponse(lab.handle_source_get(principal, x_shop, path, query))
     raise LookupError(path)
 
 
@@ -93,7 +72,8 @@ def dispatch_post(path, body):
 async def dispatch(path: str, request: Request):
     try:
         if request.method == 'GET':
-            return await run_in_threadpool(dispatch_get, '/' + path, parse_qs(request.url.query))
+            return await run_in_threadpool(dispatch_get, request.state.principal, request.headers.get('x-lab-shop'),
+                                           '/' + path, parse_qs(request.url.query))
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -102,7 +82,10 @@ async def dispatch(path: str, request: Request):
         value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError('Expected a JSON object')
-        return JSONResponse(await run_in_threadpool(dispatch_post, '/' + path, value))
+        return JSONResponse(await run_in_threadpool(
+            lab.handle_source_post, request.state.principal, request.headers.get('x-lab-shop'), '/' + path, value))
+    except lab.LabAuthError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=exc.status)
     except LookupError:
         return JSONResponse({'error': 'not found'}, status_code=404)
     except (ValueError, TypeError, KeyError) as exc:
