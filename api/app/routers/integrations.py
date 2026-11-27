@@ -158,7 +158,7 @@ async def integration_status(ctx: Ctx = Depends(require("view_dashboard"))):
             # Hidden from users until a real Loyverse integration is proven (server flag + credentials).
             "loyverse_available": loyverse_oauth.available(),
             # Online store by API key: Staging first (IDRAK_STORE_API_KEYS=on), then production.
-            "store_key_available": store_key.available()}
+            "store_key_available": store_key.available_for(ctx.org_id)}
 
 
 class RenameIn(BaseModel):
@@ -385,7 +385,7 @@ class StoreKeyIn(BaseModel):
 @router.post("/store-key/test")
 async def store_key_test(body: StoreKeyIn, ctx: Ctx = Depends(require("manage_integrations"))):
     """Check the store address + API key with the store itself. Nothing is saved."""
-    if not store_key.available():
+    if not store_key.available_for(ctx.org_id):
         raise HTTPException(503, "Online store linking is not available")
     return JSONResponse(await store_key.test(body.store_url, body.api_key, ctx), headers={"Cache-Control": "no-store"})
 
@@ -393,7 +393,7 @@ async def store_key_test(body: StoreKeyIn, ctx: Ctx = Depends(require("manage_in
 @router.post("/store-key/connect")
 async def store_key_connect(body: StoreKeyIn, ctx: Ctx = Depends(require("manage_integrations"))):
     """Link the store to THIS business; the key is stored encrypted and never returned."""
-    if not store_key.available():
+    if not store_key.available_for(ctx.org_id):
         raise HTTPException(503, "Online store linking is not available")
     linked = await store_key.connect(body.store_url, body.api_key, ctx)
     conn = await db.fetchrow(f"select {_CONN_COLS} from pos_connections c where c.id=$1 and c.org_id=$2", linked["connection_id"], ctx.org_id)
@@ -435,8 +435,6 @@ async def cron_store_catch_up(request: Request):
 @router.post("/catch-up")
 async def catch_up(ctx: Ctx = Depends(require("view_dashboard"))):
     """Pull stores linked by API key that haven't synced recently (missed notifications)."""
-    if not store_key.available():
-        return {"checked": 0, "imported": 0}
     return await store_key.catch_up(ctx.org_id)
 
 

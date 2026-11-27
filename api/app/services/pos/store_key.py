@@ -60,9 +60,26 @@ class Rejected(Exception):
     """Unauthenticated or malformed notification (no details are returned)."""
 
 
+def _mode() -> str:
+    """IDRAK_STORE_API_KEYS: 'off' (default) | 'on' (only organizations listed in
+    IDRAK_STORE_API_KEYS_ORGS) | 'all' (every organization). Anything else = off."""
+    value = os.getenv('IDRAK_STORE_API_KEYS', 'off').strip().lower()
+    return value if value in ('on', 'all') else 'off'
+
+
+def allowed_orgs() -> frozenset:
+    """Organizations allowed in 'on' mode. Fail closed: any malformed entry -> nobody."""
+    from uuid import UUID
+    raw = [x.strip() for x in os.getenv('IDRAK_STORE_API_KEYS_ORGS', '').split(',') if x.strip()]
+    try:
+        return frozenset(str(UUID(x)) for x in raw)
+    except ValueError:
+        return frozenset()
+
+
 def available() -> bool:
-    """Offered only where explicitly enabled (Staging first) and really usable."""
-    if os.getenv('IDRAK_STORE_API_KEYS', 'off').strip().lower() != 'on':
+    """Enabled for at least someone here and really usable (keys, encryption, Lab origin)."""
+    if _mode() == 'off' or (_mode() == 'on' and not allowed_orgs()):
         return False
     try:
         pairing.cipher()
@@ -70,6 +87,13 @@ def available() -> bool:
         return True
     except (HTTPException, ValueError):
         return False
+
+
+def available_for(org_id) -> bool:
+    """Enabled for THIS organization (backend gate for every store-key path)."""
+    if not available():
+        return False
+    return _mode() == 'all' or str(org_id) in allowed_orgs()
 
 
 def store_origin(value) -> str:
@@ -345,6 +369,8 @@ async def handle_notify(raw: bytes, sig: str) -> dict:
     if not autosync.enabled_globally():
         return {'status': 'ignored'}
     org_id = str(row['org_id'])
+    if not available_for(org_id):
+        return {'status': 'ignored'}
     conn = await db.fetchrow(
         """select id, org_id, provider_code, account_ref, display_name, status, config, cursor
            from pos_connections where org_id=$1 and provider_code=$2 and account_ref=$3 and status='connected'
@@ -388,6 +414,7 @@ async def catch_up_all(limit: int = 50, budget_seconds: float = 120) -> dict:
              and coalesce((config->>'store_api_key')::boolean, false)
              and (last_sync_at is null or last_sync_at < now() - make_interval(secs => $2))
            order by last_sync_at nulls first limit $3""", PROVIDER, CATCH_UP_AFTER_SECONDS, limit)
+    rows = [r for r in rows if available_for(r['org_id'])]   # only organizations enabled for API keys
     done, imported, errors = 0, 0, 0
     for r in rows:
         if time.monotonic() - started > budget_seconds:
@@ -402,6 +429,8 @@ async def catch_up_all(limit: int = 50, budget_seconds: float = 120) -> dict:
 async def catch_up(org_id: str, limit: int = 3) -> dict:
     """Compensation for missed notifications: pull API-key stores of this organization
     that have not synced recently. Cheap no-op when everything is fresh."""
+    if not available_for(org_id):
+        return {'checked': 0, 'imported': 0}
     rows = await db.fetch(
         """select id, org_id, provider_code, account_ref, display_name, status, config, cursor
            from pos_connections where org_id=$1 and provider_code=$2 and status='connected'

@@ -16,7 +16,7 @@ from app.services.pos import adapter, store_key
 LAB = "https://idrak-connect-lab-staging.vercel.app"
 KEY = "lsk_0123456789ab_" + "A" * 43
 STORE = "shop-abc123"
-ENV = {"IDRAK_LAB_ORIGIN": LAB, "IDRAK_LAB_ALLOWED_ORIGINS": LAB, "IDRAK_STORE_API_KEYS": "on",
+ENV = {"IDRAK_LAB_ORIGIN": LAB, "IDRAK_LAB_ALLOWED_ORIGINS": LAB, "IDRAK_STORE_API_KEYS": "all", "IDRAK_STORE_API_KEYS_ORGS": "",
        "IDRAK_CONNECT_ENCRYPTION_KEY": Fernet.generate_key().decode(), "IDRAK_LAB_PAIRING_KEY": "p" * 40}
 
 
@@ -179,3 +179,41 @@ class CronAndIsolationTests(unittest.TestCase):
         self.assertIn("(config->>'paired_lab')::boolean", inspect.getsource(autosync.handle_lab_notify))
         self.assertIn("(config->>'store_api_key')::boolean", inspect.getsource(store_key.handle_notify))
         self.assertIn("(config->>'store_api_key')::boolean", inspect.getsource(store_key.catch_up_all))
+
+
+class OrgAllowlistTests(unittest.TestCase):
+    A, B = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+
+    def setUp(self):
+        p = patch.dict(os.environ, ENV)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def env(self, mode, orgs=""):
+        return patch.dict(os.environ, {"IDRAK_STORE_API_KEYS": mode, "IDRAK_STORE_API_KEYS_ORGS": orgs})
+
+    def test_on_opens_only_listed_organizations(self):
+        with self.env("on", f" {self.A} "):
+            self.assertTrue(store_key.available())
+            self.assertTrue(store_key.available_for(self.A))
+            self.assertFalse(store_key.available_for(self.B))
+
+    def test_fails_closed(self):
+        for mode, orgs in (("on", ""), ("on", "not-a-uuid"), ("on", f"{self.A},bad"), ("off", self.A), ("yes", self.A), ("", self.A)):
+            with self.subTest((mode, orgs)), self.env(mode, orgs):
+                self.assertFalse(store_key.available_for(self.A))
+                self.assertFalse(store_key.available_for(self.B))
+        with self.env("on", self.A), patch.dict(os.environ, {"IDRAK_CONNECT_ENCRYPTION_KEY": ""}):
+            self.assertFalse(store_key.available_for(self.A))
+
+    def test_all_mode_is_explicit(self):
+        with self.env("all"):
+            self.assertTrue(store_key.available_for(self.A) and store_key.available_for(self.B))
+
+    def test_sync_paused_for_a_business_not_allowed(self):
+        from app.services.pos import pipeline
+        conn = {"provider_code": "lab_web", "account_ref": "shop-a", "config": {"store_api_key": True, "base_url": LAB}}
+        never = AsyncMock(side_effect=AssertionError("credentials must not be read when paused"))
+        with self.env("on", self.A), patch.object(store_key, "load_credentials", never):
+            with self.assertRaises(adapter.SourceTemporaryError):
+                asyncio.run(pipeline._adapter_for(conn, self.B))
