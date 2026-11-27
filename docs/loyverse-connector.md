@@ -39,7 +39,7 @@ Status: built and tested locally against a contract stub with synthetic data. **
 | `LOYVERSE_REDIRECT_URI` | exactly one of the app's registered redirect URLs, e.g. `https://<web>/ar/app/integrations/loyverse/callback` |
 | `LOYVERSE_WEBHOOK_URL` | `https://<api>/integrations/loyverse/webhook` |
 
-Database: `api/db/migrations/012_loyverse_oauth.sql` (additive; apply separately).
+Database: `api/db/migrations/013_loyverse_oauth.sql` (additive; apply separately).
 
 ## Not verified yet (check against real Loyverse)
 - Whether creating an OAuth app or using the API requires approval or a paid plan. The API defines `402 PAYMENT_REQUIRED` for lapsed subscriptions.
