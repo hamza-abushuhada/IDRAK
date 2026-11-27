@@ -203,7 +203,7 @@ function SystemCard({ system, canManage, autoSync, onManage, onChanged }: {
     <div className="px-4 py-4 sm:px-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-start gap-3">
-          {vendorCode(system) ? <VendorLogo code={vendorCode(system)!} name={labels.vendor(system)} size={44} />
+          {vendorCode(system) ? <VendorLogo code={vendorCode(system)!} name={labels.vendor(system)} />
             : <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-terra-soft text-terra-2"><KindIcon size={20} /></span>}
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">

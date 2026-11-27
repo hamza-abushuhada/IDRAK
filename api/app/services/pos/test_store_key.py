@@ -5,7 +5,7 @@ import json
 import os
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from cryptography.fernet import Fernet
@@ -130,3 +130,52 @@ class StoreKeyTests(unittest.TestCase):
             self.assertFalse(store_key.available())
         with patch.dict(os.environ, {"IDRAK_CONNECT_ENCRYPTION_KEY": ""}):
             self.assertFalse(store_key.available())
+
+
+class CronAndIsolationTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.dict(os.environ, ENV)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_cron_requires_a_long_secret_compared_exactly(self):
+        with patch.dict(os.environ, {"CRON_SECRET": ""}):
+            self.assertFalse(store_key.cron_authorized("Bearer "))
+        with patch.dict(os.environ, {"CRON_SECRET": "short"}):
+            self.assertFalse(store_key.cron_authorized("Bearer short"))
+        secret = "c" * 40
+        with patch.dict(os.environ, {"CRON_SECRET": secret}):
+            self.assertTrue(store_key.cron_authorized("Bearer " + secret))
+            for bad in (None, "", secret, "Bearer " + secret[:-1], "bearer " + secret, "Bearer " + secret + " "):
+                self.assertFalse(store_key.cron_authorized(bad), repr(bad))
+
+    def test_flag_on_never_changes_how_loyverse_lab_or_demo_connect(self):
+        """With IDRAK_STORE_API_KEYS=on, existing connection kinds keep their own adapters and
+        never read store-key credentials; store-key routing needs config.store_api_key."""
+        from app.services.pos import pipeline, demo, loyverse, lab as labmod
+        org = "11111111-1111-1111-1111-111111111111"
+        never = AsyncMock(side_effect=AssertionError("store-key credentials must not be read"))
+        with patch.object(store_key, "load_credentials", never), \
+                patch("app.services.pos.loyverse_oauth.access_token", AsyncMock(return_value="tok")), \
+                patch("app.services.pos.pairing.load_credentials", AsyncMock(return_value={"shop_id": "shop-a", "org_id": org, "token": "lc.shop-a." + "t" * 43, "webhook_secret": "f" * 64})), \
+                patch("app.services.pos.pairing.lab_origin", return_value=LAB):
+            for flag in ("off", "on"):
+                with patch.dict(os.environ, {"IDRAK_STORE_API_KEYS": flag}):
+                    a = asyncio.run(pipeline._adapter_for({"provider_code": "demo", "account_ref": "demo", "config": {}}, org))
+                    self.assertIsInstance(a, demo.DemoPOSAdapter)
+                    a = asyncio.run(pipeline._adapter_for({"provider_code": "loyverse", "account_ref": "m1", "config": {}}, org))
+                    self.assertIsInstance(a, loyverse.LoyverseAdapter)
+                    a = asyncio.run(pipeline._adapter_for({"provider_code": "lab_web", "account_ref": "shop-a",
+                                                           "config": {"paired_lab": True, "base_url": LAB}}, org))
+                    self.assertIs(type(a), labmod.LabWebAdapter)
+        self.assertTrue(pipeline._lab_shop({"paired_lab": True}) and pipeline._lab_shop({"store_api_key": True}))
+        self.assertFalse(pipeline._lab_shop({}) or pipeline._lab_shop({"autosync": "webhook"}))
+
+    def test_notification_paths_cannot_cross(self):
+        """Lab approval-link signals only select paired connections; store-key signals only
+        select store-key connections (checked in the SQL each handler uses)."""
+        import inspect
+        from app.services.pos import autosync
+        self.assertIn("(config->>'paired_lab')::boolean", inspect.getsource(autosync.handle_lab_notify))
+        self.assertIn("(config->>'store_api_key')::boolean", inspect.getsource(store_key.handle_notify))
+        self.assertIn("(config->>'store_api_key')::boolean", inspect.getsource(store_key.catch_up_all))

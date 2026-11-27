@@ -370,6 +370,35 @@ async def _sync(org_id: str, conn: dict, trigger: str) -> dict:
         return {'status': 'error'}
 
 
+def cron_authorized(authorization: str | None) -> bool:
+    """Vercel Cron sends 'Authorization: Bearer $CRON_SECRET'. No (or a short) secret = refuse."""
+    secret = os.getenv('CRON_SECRET', '')
+    return len(secret) >= 32 and isinstance(authorization, str) and hmac.compare_digest(authorization, 'Bearer ' + secret)
+
+
+async def catch_up_all(limit: int = 50, budget_seconds: float = 120) -> dict:
+    """Scheduled compensation for missed notifications, without anyone visiting IDRAK:
+    pull every API-key store (any organization) whose last sync is older than
+    CATCH_UP_AFTER_SECONDS. Each sync runs with that connection's own organization,
+    the normal per-organization lock and source identity, so repeats never duplicate."""
+    started = time.monotonic()
+    rows = await db.fetch(
+        """select id, org_id, provider_code, account_ref, display_name, status, config, cursor
+           from pos_connections where provider_code=$1 and status='connected'
+             and coalesce((config->>'store_api_key')::boolean, false)
+             and (last_sync_at is null or last_sync_at < now() - make_interval(secs => $2))
+           order by last_sync_at nulls first limit $3""", PROVIDER, CATCH_UP_AFTER_SECONDS, limit)
+    done, imported, errors = 0, 0, 0
+    for r in rows:
+        if time.monotonic() - started > budget_seconds:
+            break
+        out = await _sync(str(r['org_id']), dict(r), 'scheduled')
+        done += 1
+        imported += out.get('imported', 0)
+        errors += out.get('status') == 'error'
+    return {'due': len(rows), 'synced': done, 'imported': imported, 'errors': errors}
+
+
 async def catch_up(org_id: str, limit: int = 3) -> dict:
     """Compensation for missed notifications: pull API-key stores of this organization
     that have not synced recently. Cheap no-op when everything is fresh."""

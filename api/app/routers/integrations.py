@@ -431,6 +431,17 @@ async def store_notify(request: Request):
     return JSONResponse(result, status_code=202, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/cron/store-catch-up")
+async def cron_store_catch_up(request: Request):
+    """Scheduled (Vercel Cron) pull of API-key stores that missed notifications.
+    Authenticated only by CRON_SECRET; returns counts only, never connection details."""
+    if not store_key.cron_authorized(request.headers.get("authorization")):
+        raise HTTPException(401, "Unauthorized")
+    if not store_key.available():
+        return JSONResponse({"status": "disabled"}, headers={"Cache-Control": "no-store"})
+    return JSONResponse(await store_key.catch_up_all(), headers={"Cache-Control": "no-store"})
+
+
 @router.post("/catch-up")
 async def catch_up(ctx: Ctx = Depends(require("view_dashboard"))):
     """Pull stores linked by API key that haven't synced recently (missed notifications)."""
