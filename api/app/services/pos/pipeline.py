@@ -110,6 +110,10 @@ async def _adapter_for(connection, org_id):
         return loyverse.LoyverseAdapter(token, connection.get('config') or {})
     if connection['provider_code'] == 'lab_web' and (connection.get('config') or {}).get('store_api_key'):
         from . import store_key
+        from .adapter import SourceTemporaryError
+        if not store_key.available_for(org_id):
+            # Kill switch: nothing is fetched or changed; the cursor stays where it is.
+            raise SourceTemporaryError('Online store syncing is paused for this business')
         creds = await store_key.load_credentials(connection, org_id)
         return store_key.LabStoreKeyAdapter(creds, branch=(connection.get('config') or {}).get('branch_name') or ('Lab ' + connection['account_ref']))
     if connection['provider_code'] in ('lab_pos', 'lab_web') and (connection.get('config') or {}).get('paired_lab'):
