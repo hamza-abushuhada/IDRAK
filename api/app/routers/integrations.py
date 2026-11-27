@@ -16,6 +16,7 @@ from .. import db
 from ..auth import Ctx, require
 from ..services.pos import pipeline, registry
 from ..services.pos import pairing
+from ..services.pos import autosync
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -36,6 +37,23 @@ async def lab_authorize(body: AuthorizeIn, ctx: Ctx = Depends(require("manage_in
     name = (org["name_ar"] if body.locale == "ar" and org["name_ar"] else org["name"]) if org else ""
     return JSONResponse(pairing.new_authorization(ctx.org_id, ctx.user.id, body.locale, name or ""),
                         headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/lab/notify', status_code=202)
+async def lab_notify(request: Request):
+    """Signed "something changed" signal from a paired Lab shop (server-to-server).
+    No user session: authenticity is the per-shop HMAC signature. Carries no sales
+    data; IDRAK pulls the changes itself. Responses never reveal why a call failed."""
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > autosync.MAX_BODY:
+            raise HTTPException(413, 'Too large')
+    try:
+        result = await autosync.handle_lab_notify(bytes(raw), request.headers.get('x-idrak-signature', ''))
+    except autosync.Rejected:
+        raise HTTPException(401, 'Invalid notification') from None
+    return JSONResponse(result, status_code=202, headers={'Cache-Control': 'no-store'})
 
 
 @router.post('/lab/pair')
@@ -81,6 +99,8 @@ def _public(conn, ctx: Ctx | None = None) -> dict:
     out["group_key"] = hashlib.sha256(f"{family}:{conn.get('account_ref') or out.get('id')}".encode()).hexdigest()[:16]
     if ctx is not None and not ctx.can("manage_integrations"):
         out.pop("account_ref", None)
+    # Honest per-connection flag: true only when sales really sync without "Sync now".
+    out["auto_sync_effective"] = bool((auto_sync_active() and cfg.get("auto_sync")) or autosync.effective(dict(conn)))
     return out
 
 

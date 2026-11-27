@@ -15,6 +15,7 @@ export type Connection = {
   sync_count: number; open_errors: number; group_key: string;
   account_ref?: string; // managers only (advanced details)
   config?: { channel?: string; auto_sync?: boolean; paired_lab?: boolean } | null;
+  auto_sync_effective?: boolean; // server truth: syncs without "Sync now" right now
 };
 export type Provider = {
   code: string; name: string; name_ar: string | null; category: string;
@@ -98,9 +99,10 @@ export function friendlyError(status: number | undefined, ar: boolean): string {
   return t("Something went wrong. Check your internet connection and try again.", "حدث خطأ. تحقق من اتصالك بالإنترنت وحاول مجددًا.");
 }
 
-/** Automatic sync is shown only when the scheduler really runs AND an active channel has it on (Demo POS is always manual). */
+/** Automatic sync is shown only when the server says an active channel really syncs on its own (Demo POS is manual). */
 export function systemAutoSync(system: ConnectedSystem, schedulerActive: boolean): boolean {
-  return schedulerActive && system.channels.some((c) => c.conn.status !== "disconnected" && c.conn.config?.auto_sync === true);
+  return system.channels.some((c) => c.conn.status !== "disconnected"
+    && (c.conn.auto_sync_effective ?? (schedulerActive && c.conn.config?.auto_sync === true)));
 }
 
 /** Wizard steps map onto the same four phases for every system, so the step count never changes mid-way. */

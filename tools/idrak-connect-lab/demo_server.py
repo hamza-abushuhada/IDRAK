@@ -478,7 +478,13 @@ def create_order(shop, channel, req):
         append_event(db,shop,channel,'sale.created',external_id,1,{'order':order_payload(db,row)})
         if completed: append_inventory_events(db,shop,channel,external_id,1,counts)
     flush_events(channel, shop)
+    notify_idrak(shop, channel)
     return {'order_id':external_id, 'total':money(total),'status':status}
+
+def notify_idrak(shop, channel):
+    """After the sale is committed and no DB connection is held: signal IDRAK if this shop is linked."""
+    import idrak_notify
+    idrak_notify.notify(shop, channel)
 
 def change_order(shop, external_id, status):
     if status not in ('completed','cancelled','refunded'):
@@ -508,6 +514,7 @@ def change_order(shop, external_id, status):
             append_inventory_events(db,shop,order['channel'],external_id,new_rev,[i['sku'] for i in items])
         channel=order['channel']
     flush_events(channel, shop)
+    notify_idrak(shop, channel)
     return {'order_id':external_id, 'status':status}
 
 def sign(raw, shop):
