@@ -107,7 +107,7 @@ function render() {
   show('consent');
   const tick = () => {
     const left = Math.max(0, Math.ceil(ctx.expires_at - Date.now() / 1000));
-    $('expiry').textContent = t('صلاحية الطلب ', 'Request expires in ') + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
+    $('expiry').textContent = t('ينتهي الطلب خلال ', 'Request expires in ') + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
     if (!left) failure(400);
   };
   tick(); timer = setInterval(tick, 1000);
