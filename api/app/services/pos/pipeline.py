@@ -104,6 +104,10 @@ def build_adapter(connection: dict, org_id: str, now: dt.datetime | None = None)
 
 
 async def _adapter_for(connection, org_id):
+    if connection['provider_code'] == 'loyverse':
+        from . import loyverse, loyverse_oauth
+        token = await loyverse_oauth.access_token(connection, org_id)
+        return loyverse.LoyverseAdapter(token, connection.get('config') or {})
     if connection['provider_code'] in ('lab_pos', 'lab_web') and (connection.get('config') or {}).get('paired_lab'):
         from .pairing import load_credentials
         connection = {**connection, '_lab_credentials': await load_credentials(connection, org_id)}
@@ -399,17 +403,34 @@ async def run_sync(org_id: str, user_id: str | None, connection: dict,
                    trigger: str = "manual", initial: bool = False) -> dict:
     connection_id = str(connection["id"])
     pctx = _proc_ctx(connection, org_id)
-    adp = await _adapter_for(connection, org_id)
     ctx_cursor = connection.get("cursor") or {}
 
     import anyio
-    if initial:
-        events = list(await anyio.to_thread.run_sync(adp.initial_events))
-        next_cursor = {"initial_done": True, "round": 0}
-    else:
-        from .adapter import AdapterContext
-        ac = AdapterContext(org_id=org_id, config=connection.get("config") or {}, cursor=ctx_cursor)
-        events, next_cursor = await anyio.to_thread.run_sync(lambda: adp.fetch_changes(ac))
+    from .adapter import AdapterContext, SourceAuthError, SourceTemporaryError
+    try:
+        adp = await _adapter_for(connection, org_id)
+        if initial:
+            events = list(await anyio.to_thread.run_sync(adp.initial_events))
+            next_cursor = {"initial_done": True, "round": 0}
+        else:
+            ac = AdapterContext(org_id=org_id, config=connection.get("config") or {}, cursor=ctx_cursor)
+            events, next_cursor = await anyio.to_thread.run_sync(lambda: adp.fetch_changes(ac))
+    except (SourceAuthError, SourceTemporaryError) as exc:
+        # Source refused or was unavailable: nothing imported, cursor NOT advanced.
+        # Revoked/expired access needs the owner to reconnect; temporary errors retry next run.
+        revoked = isinstance(exc, SourceAuthError)
+        message = str(exc)[:200]
+        job_id = await db.fetchval(
+            """insert into pos_sync_jobs(org_id,connection_id,trigger,status,cursor_before,error,finished_at)
+               values($1,$2,$3,'failed',$4,$5,now()) returning id""",
+            org_id, connection_id, "initial" if initial else trigger, ctx_cursor, message)
+        await db.execute(
+            """update pos_connections set
+                 status = case when status='disconnected' then 'disconnected' when $3 then 'error' else status end,
+                 last_sync_at=now(), last_error=$2, updated_at=now()
+               where id=$1 and org_id=$4""", connection_id, message, revoked, org_id)
+        return {"job_id": str(job_id), "status": "failed", "imported": 0, "updated": 0, "skipped": 0, "failed": 0,
+                "error": "reconnect_required" if revoked else "temporarily_unavailable"}
 
     # استطلاع تلقائي بلا جديد: نلمس آخر مزامنة ونخرج بلا مهمّة فارغة في السجلّ.
     if not events and trigger in ("scheduled", "webhook") and not initial:
@@ -515,10 +536,11 @@ async def test_connection(connection: dict, org_id: str) -> dict:
     if connection.get("status") == "disconnected":
         # Never contact a source for a connection the owner disconnected.
         return {"ok": False, "checks": [{"name": "connection", "ok": False, "detail": "Connection is disconnected"}]}
+    from .adapter import SourceAuthError, SourceTemporaryError
     try:
         adp = await _adapter_for(connection, org_id)
-    except ValueError as exc:
-        return {"ok": False, "checks": [{"name": "adapter", "ok": False, "detail": str(exc)}]}
+    except (ValueError, SourceAuthError, SourceTemporaryError) as exc:
+        return {"ok": False, "checks": [{"name": "adapter", "ok": False, "detail": str(exc)[:200]}]}
     caps = getattr(adp, "capabilities", None)
     sample = []
     try:
@@ -526,7 +548,10 @@ async def test_connection(connection: dict, org_id: str) -> dict:
         import anyio
         ctx = AdapterContext(org_id=org_id, config=connection.get("config") or {}, cursor={})
         # الجلب متزامن (urllib) — ننفّذه في خيط حتى لا نحجب حلقة الأحداث.
-        sample, _ = await anyio.to_thread.run_sync(lambda: adp.fetch_changes(ctx))
+        if hasattr(adp, "probe"):
+            sample = await anyio.to_thread.run_sync(adp.probe)
+        else:
+            sample, _ = await anyio.to_thread.run_sync(lambda: adp.fetch_changes(ctx))
         checks.append({"name": "reachable", "ok": True,
                        "detail": f"fetched {len(sample)} event(s) from source"})
     except Exception as exc:  # شبكة/مصادقة/شكل بيانات

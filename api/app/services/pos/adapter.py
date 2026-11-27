@@ -66,3 +66,13 @@ class POSAdapter:
         """تحقّق توقيع الـ webhook + حماية إعادة التشغيل. لا يُوجد مستقبِل
         عامّ بلا تحقّق: أيّ موصّل حقيقي يجب أن يملأ هذه قبل الإنتاج."""
         raise NotImplementedError("webhook verification must be implemented per vendor")
+
+
+class SourceAuthError(Exception):
+    """The source refused our credentials (revoked, expired beyond refresh, unpaid,
+    missing permission). The connection needs the owner to reconnect."""
+
+
+class SourceTemporaryError(Exception):
+    """Temporary source problem (network, 5xx, rate limit). Retried on the next run;
+    the saved cursor is not advanced."""

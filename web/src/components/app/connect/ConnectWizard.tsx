@@ -17,17 +17,19 @@ import { friendlyError, PHASES, phaseOf, type Provider, type WizardStep } from "
 import { savePending } from "./pending";
 
 type SystemType = "pos" | "store";
-type Choice = "lab" | "demo";
+type Choice = "lab" | "demo" | "loyverse";
 type Check = { name: string; ok: boolean };
 type TestResult = { ok: boolean; checks: Check[] };
 
 // The manual pairing-code method stays as an admin fallback, reachable only with ?pairing=manual.
 const manualPairing = () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("pairing") === "manual";
 
-export default function ConnectWizard({ open, onOpenChange, providers, labLinking, initialChoice, onConnected }: {
+export default function ConnectWizard({ open, onOpenChange, providers, labLinking, loyverseAvailable = false, initialChoice, onConnected }: {
   open: boolean; onOpenChange: (o: boolean) => void; providers: Provider[] | undefined;
   /** The server can really link a Lab shop here (true on Staging). Demo POS never depends on it. */
   labLinking: boolean;
+  /** Hidden until a real Loyverse integration is proven (server flag + registered app). */
+  loyverseAvailable?: boolean;
   initialChoice?: Choice | null; onConnected: () => void;
 }) {
   const tx = useTx();
@@ -45,7 +47,7 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
   const has = (code: string) => !!providers?.some((p) => p.code === code && p.is_implemented);
   const labAvailable = labLinking && has("lab_pos") && has("lab_web") && !!LAB_LOGIN_URL;
   const demoAvailable = has("demo");
-  const options = { lab: labAvailable, demo: type === "pos" && demoAvailable };
+  const options = { lab: labAvailable, demo: type === "pos" && demoAvailable, loyverse: type === "pos" && loyverseAvailable };
 
   function reset(o: boolean) {
     if (!o) {
@@ -71,6 +73,20 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
       if (!LAB_LOGIN_URL || target.origin !== new URL(LAB_LOGIN_URL).origin || target.pathname !== "/connect" || target.search) throw new ApiError(503, "lab origin");
       savePending({ intent: r.intent, state: r.state, org, user, expires_at: r.expires_at });
       window.location.assign(r.authorize_url); // busy stays on while the browser leaves
+    } catch (e) { fail(e); setBusy(false); }
+  }
+
+  async function continueToLoyverse() {
+    setBusy(true); setError("");
+    try {
+      const org = getOrgId(), user = session?.user.id;
+      if (!org || !user) throw new ApiError(401, "no session");
+      const r = await api<{ authorize_url: string; intent: string; state: string; expires_at: number }>(
+        "/integrations/loyverse/authorize", { method: "POST", json: { locale: tx.isAr ? "ar" : "en" } });
+      const target = new URL(r.authorize_url);
+      if (target.origin !== "https://api.loyverse.com" || target.pathname !== "/oauth/authorize") throw new ApiError(503, "loyverse origin");
+      savePending({ intent: r.intent, state: r.state, org, user, expires_at: r.expires_at }, "loyverse");
+      window.location.assign(r.authorize_url);
     } catch (e) { fail(e); setBusy(false); }
   }
 
@@ -150,13 +166,19 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
                 body={tx("A practice cashier and online store for trying the connection. Not a real sales system.", "كاشير ومتجر إلكتروني للتجربة فقط، لاختبار الربط. ليس نظام مبيعات حقيقيًا.")}
                 method={tx("Sign in to the test system and approve", "تسجيل الدخول إلى نظام الاختبار والموافقة")} />
             )}
+            {options.loyverse && (
+              <ProviderOption onClick={() => { setChoice("loyverse"); go("connect"); }}
+                title="Loyverse POS" badge={<Badge tone="neutral">{tx("Cashier system", "نظام كاشير")}</Badge>}
+                body={tx("Connect your Loyverse account. You sign in at Loyverse and approve read-only access to your receipts.", "اربط حسابك في Loyverse. تسجّل الدخول في Loyverse وتوافق على قراءة فواتيرك فقط.")}
+                method={tx("Sign in to Loyverse and approve", "تسجيل الدخول إلى Loyverse والموافقة")} />
+            )}
             {options.demo && (
               <ProviderOption onClick={() => { setChoice("demo"); go("connect"); }}
                 title={tx("Demo POS", "كاشير تجريبي")} badge={<Badge tone="neutral"><Sparkles size={11} />{tx("Sample data", "بيانات وهمية")}</Badge>}
                 body={tx("Fills IDRAK with sample sales so you can explore the reports. No real system or shop is connected.", "يضيف مبيعات وهمية لتجربة التقارير في إدراك. لا يرتبط بأي نظام أو محل حقيقي.")}
                 method={tx("One click, nothing to set up", "بضغطة واحدة، دون أي إعداد")} />
             )}
-            {!options.lab && !options.demo && (
+            {!options.lab && !options.demo && !options.loyverse && (
               <p className="rounded-xl border border-dashed border-line bg-paper-2/40 p-4 text-[13px] text-ink-2">
                 {type === "store"
                   ? tx("Online stores can't be connected directly yet.", "لا يمكن ربط المتاجر الإلكترونية مباشرة بعد.")
@@ -194,6 +216,22 @@ export default function ConnectWizard({ open, onOpenChange, providers, labLinkin
               {tx("Admin fallback: link with a pairing code", "بديل إداري: الربط برمز اقتران")}
             </button>
           )}
+        </section>
+      )}
+
+      {step === "connect" && choice === "loyverse" && (
+        <section aria-labelledby="w-loyverse">
+          <h3 id="w-loyverse" className="font-serif text-[17px] text-ink">{tx("Connect Loyverse", "ربط Loyverse")}</h3>
+          <ol className="mt-4 list-decimal space-y-2 ps-5 text-[13.5px] text-ink-2">
+            <li>{tx("Sign in to Loyverse with your Loyverse account.", "سجّل الدخول إلى Loyverse بحسابك فيه.")}</li>
+            <li>{tx("Allow IDRAK to read your stores and receipts (read-only).", "اسمح لإدراك بقراءة محلاتك وفواتيرك (قراءة فقط).")}</li>
+            <li>{tx("You'll return here and your receipts start arriving.", "ستعود إلى هنا وتبدأ فواتيرك بالوصول.")}</li>
+          </ol>
+          <p className="mt-4 rounded-lg bg-sand/60 p-3 text-[12.5px] text-ink-3">{tx("IDRAK never sees your Loyverse password. You can disconnect at any time from IDRAK or from Apps in your Loyverse Back Office.", "لا يرى إدراك كلمة مرورك في Loyverse. يمكنك قطع الاتصال في أي وقت من إدراك أو من قسم Apps في Loyverse.")}</p>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <Button variant="ghost" size="sm" onClick={() => go("provider")} disabled={busy}><Back size={14} />{tx("Back", "رجوع")}</Button>
+            <Button onClick={continueToLoyverse} loading={busy} disabled={busy}>{tx("Continue to Loyverse", "متابعة إلى Loyverse")}{!busy && <ExternalLink size={14} />}</Button>
+          </div>
         </section>
       )}
 
