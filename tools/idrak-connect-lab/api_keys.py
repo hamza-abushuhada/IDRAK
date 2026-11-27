@@ -193,6 +193,11 @@ def notifications(principal, req):
         raise ValueError('Expected {"enabled": true|false}')
     secret = notify_secret(principal.user_id) if req['enabled'] else None
     with lab.connect(lab.SOURCE_DB) as db:
+        db.execute('BEGIN IMMEDIATE')
+        if req['enabled']:
+            # One active subscription per store: the newest linking key wins (re-link with a new
+            # or rotated key moves it); every other key of this store stops being notified.
+            db.execute('UPDATE lab_api_keys SET notify=0 WHERE shop_id=? AND key_id<>?', (principal.shop_id, principal.user_id))
         db.execute('UPDATE lab_api_keys SET notify=? WHERE key_id=? AND shop_id=? AND revoked_at IS NULL',
                    (1 if req['enabled'] else 0, principal.user_id, principal.shop_id))
     return {'enabled': req['enabled'], **({'signing_secret': secret} if secret else {})}
@@ -202,5 +207,5 @@ def subscribers(shop):
     """Active keys of this shop that asked for notifications."""
     with lab.connect(lab.SOURCE_DB) as db:
         rows = db.execute('SELECT key_id FROM lab_api_keys WHERE shop_id=? AND notify=1 AND revoked_at IS NULL '
-                          'AND (expires_at IS NULL OR expires_at>?)', (shop, int(time.time()))).fetchall()
+                          'AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at DESC LIMIT 1', (shop, int(time.time()))).fetchall()
     return [r['key_id'] for r in rows]

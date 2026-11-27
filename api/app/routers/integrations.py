@@ -334,31 +334,21 @@ async def connection_errors(conn_id: str, ctx: Ctx = Depends(require("view_dashb
 
 
 @router.delete("/connections/{conn_id}")
-async def disconnect(conn_id: str, purge: bool = False, ctx: Ctx = Depends(require("manage_integrations"))):
-    """قطع الاتصال. الافتراضي قطع ناعم (يوقف المزامنة ويُبقي البيانات).
-    purge=true يحذف الاتصال وكل مبيعاته وأصنافه التي لم تُستخدم في مبيعات أخرى
-    — حذف لا يُتراجَع عنه، تؤكّده الواجهة أولاً."""
+async def disconnect(conn_id: str, request: Request, ctx: Ctx = Depends(require("manage_integrations"))):
+    """قطع الاتصال: يوقف المزامنة ويُبقي كل البيانات. لا يوجد أي مسار حذف دائم:
+    الفواتير والمرتجعات والمنتجات وسجلات الاتصال والمزامنة تبقى دائمًا (أي مستخدم، أي دور).
+    طلب purge مرفوض من الخادم قبل أي تغيير، ويُسجَّل في التدقيق."""
+    if "purge" in request.query_params:
+        await db.audit(ctx.org_id, ctx.user.id, "pos.purge_refused", "pos_connection", conn_id, {})
+        raise HTTPException(403, "Permanent deletion of synced sales is disabled. Use Disconnect or Remove system; your data is kept.")
     conn = await db.fetchrow("select id, provider_code, account_ref, config from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
     if not conn:
         raise HTTPException(404, "Connection not found")
     await _stop_at_source(conn, ctx.org_id)
-    if not purge:
-        await db.execute("update pos_connections set status='disconnected', updated_at=now() where id=$1 and org_id=$2",
-                         conn_id, ctx.org_id)
-        await db.audit(ctx.org_id, ctx.user.id, "pos.disconnected", "pos_connection", conn_id, {"purge": False})
-        return {"ok": True, "purged": False}
-    async with db.transaction() as c:
-        s = await c.execute("delete from sales where pos_connection_id=$1 and org_id=$2", conn_id, ctx.org_id)
-        p = await c.execute(
-            """delete from products pr where pr.pos_connection_id=$1 and pr.org_id=$2
-                 and not exists (select 1 from sale_items si where si.product_id=pr.id)""", conn_id, ctx.org_id)
-        # الاتصال: cascade يحذف jobs / source_records / errors. مبيعات أخرى
-        # (لو بقيت) تُفقد مرجع المصدر فقط عبر on delete set null.
-        await c.execute("delete from pos_connections where id=$1 and org_id=$2", conn_id, ctx.org_id)
-    db.cache_clear()
-    counts = {"sales": int(s.split()[-1]), "products": int(p.split()[-1])}
-    await db.audit(ctx.org_id, ctx.user.id, "pos.purged", "pos_connection", conn_id, counts)
-    return {"ok": True, "purged": True, "deleted": counts}
+    await db.execute("update pos_connections set status='disconnected', updated_at=now() where id=$1 and org_id=$2",
+                     conn_id, ctx.org_id)
+    await db.audit(ctx.org_id, ctx.user.id, "pos.disconnected", "pos_connection", conn_id, {})
+    return {"ok": True, "purged": False}
 
 
 async def _stop_at_source(conn, org_id: str) -> None:

@@ -487,8 +487,12 @@ def create_order(shop, channel, req):
     return {'order_id':external_id, 'total':money(total),'status':status}
 
 def notify_idrak(shop, channel):
-    """After the sale is committed and no DB connection is held: signal IDRAK if this shop is linked."""
+    """After the sale is committed and no DB connection is held: signal IDRAK if this shop is linked.
+    When the web entrypoint deferred notifications for this request, they are queued and sent
+    after the response, so an order never waits for (or fails because of) IDRAK."""
     import idrak_notify
+    if idrak_notify.defer(shop, channel):
+        return
     idrak_notify.notify(shop, channel)
 
 def change_order(shop, external_id, status):
