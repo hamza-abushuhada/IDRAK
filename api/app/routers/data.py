@@ -383,11 +383,6 @@ async def _build_batch_report(batch_id: str, org_id: str) -> dict:
 
 class BatchContract(BaseModel):
     currency: str = "JOD"
-    price_unit: str = "jd"
-    tax_mode: str = "none"
-    tax_rate: Decimal | None = None
-    date_order: str = "auto"
-    unknown_values: str = "block"
 
 
 @router.post("/batches")
@@ -443,27 +438,6 @@ async def get_batch(batch_id: str, ctx: Ctx = Depends(require("view_dashboard"))
     batch["uploads"] = await db.fetch("""select id,file_name,entity,row_count,status,health_before,health_after
                                          from uploads where batch_id=$1 and org_id=$2 order by created_at""", batch_id, ctx.org_id)
     return batch
-
-
-@router.put("/batches/{batch_id}/contract")
-async def update_batch_contract(batch_id: str, contract: BatchContract, ctx: Ctx = Depends(require("clean_data"))):
-    if contract.price_unit not in ("jd", "fils"):
-        raise HTTPException(422, "price_unit must be jd or fils")
-    if contract.tax_mode not in ("none", "from_file", "included", "excluded"):
-        raise HTTPException(422, "Unsupported tax mode")
-    if contract.date_order not in ("auto", "dmy", "mdy", "ymd"):
-        raise HTTPException(422, "Unsupported date order")
-    if contract.unknown_values not in ("block", "review"):
-        raise HTTPException(422, "Unsupported unknown-value policy")
-    if contract.tax_rate is not None and not Decimal("0") <= contract.tax_rate <= Decimal("100"):
-        raise HTTPException(422, "tax_rate must be between 0 and 100")
-    if contract.tax_mode in ("included", "excluded") and contract.tax_rate is None:
-        raise HTTPException(422, "tax_rate is required for included or excluded tax")
-    result = await db.execute("update import_batches set contract=$3,updated_at=now() where id=$1 and org_id=$2",
-                              batch_id, ctx.org_id, contract.model_dump(mode="json"))
-    if result.endswith(" 0"):
-        raise HTTPException(404, "Import batch not found")
-    return await get_batch(batch_id, ctx)
 
 
 class UrlIn(BaseModel):
@@ -593,12 +567,7 @@ async def clean(upload_id: str, ctx: Ctx = Depends(require("clean_data"))):
         raise HTTPException(409, _BLOCKED)
     mapping = {h: ((u["mapping"] or {}).get(h) or {}).get("field") for h in headers}
     ctxk = await load_context(ctx.org_id)
-    contract = {}
-    if u.get("batch_id"):
-        contract = await db.fetchval("select contract from import_batches where id=$1 and org_id=$2", u["batch_id"], ctx.org_id) or {}
-    res = engine.run(headers, d["raw_rows"], mapping, ctxk,
-                     price_unit=contract.get("price_unit", "jd"), date_order=contract.get("date_order", "auto"),
-                     entity=state["entity"])
+    res = engine.run(headers, d["raw_rows"], mapping, ctxk, entity=state["entity"])
     memory_hits = sum(1 for c in res["changes"] if c["rule"] == "memory")
     # الصنف غير الموجود ليس سبباً لتخطّي الصف: الاستيراد ينشئه.
     # كان هنا فكانت كل صفوف ملف فيه أصناف جديدة تُتخطّى.
@@ -858,11 +827,12 @@ class SkippedRow(Exception):
 
 @router.post("/runs/{run_id}/apply")
 async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
-    run = await db.fetchrow("""select r.*, u.columns, u.mapping, u.entity, u.file_name, u.batch_id, b.contract as batch_contract
-                               from cleaning_runs r join uploads u on u.id=r.upload_id left join import_batches b on b.id=u.batch_id
+    run = await db.fetchrow("""select r.*, u.columns, u.mapping, u.entity, u.file_name, u.batch_id
+                               from cleaning_runs r join uploads u on u.id=r.upload_id
                                where r.id=$1 and r.org_id=$2""", run_id, ctx.org_id)
     if not run:
         raise HTTPException(404)
+    org_tax = await db.fetchrow("select tax_mode, tax_rate from organizations where id=$1", ctx.org_id)
     if run["imported_at"] and not run["reverted_at"]:
         raise HTTPException(409, "Already imported")
     # نفس حارس clean: تشغيلات قديمة (قبل هذا الحارس) أو ربط تغيّر بعد التنظيف.
@@ -1280,11 +1250,10 @@ async def apply_run(run_id: str, ctx: Ctx = Depends(require("clean_data"))):
                     if not items:
                         continue
                     sid = uuid.uuid4()
-                    contract = run["batch_contract"] or {}
                     # لو الملف يحمل نسباً، مجموع خصومات البنود هو خصم الفاتورة.
                     discount = disc_lines if has_pct else (_money(g(r0, "discount") or 0) or Decimal("0"))
-                    tax_mode = contract.get("tax_mode", "none")
-                    rate = Decimal(str(contract.get("tax_rate") or 0)) / Decimal("100")
+                    tax_mode = (org_tax["tax_mode"] if org_tax else None) or "none"
+                    rate = Decimal(str((org_tax["tax_rate"] if org_tax else None) or 0)) / Decimal("100")
                     if tax_mode == "from_file":
                         tax = _money(g(r0, "tax"))
                         if tax is None:

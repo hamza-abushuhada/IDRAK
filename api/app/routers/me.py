@@ -104,6 +104,8 @@ class OrgPatch(BaseModel):
     industry: str | None = None
     city: str | None = None
     tax_number: str | None = None
+    tax_mode: str | None = None
+    tax_rate: float | None = None
     locale: str | None = None
     monthly_rent: float | None = None
     opening_cash: float | None = None
@@ -113,6 +115,16 @@ class OrgPatch(BaseModel):
 @router.patch("/org")
 async def patch_org(p: OrgPatch, ctx: Ctx = Depends(require("manage_org"))):
     data = {k: v for k, v in p.model_dump().items() if v is not None}
+    if "tax_mode" in data and data["tax_mode"] not in ("none", "from_file", "included", "excluded"):
+        raise HTTPException(422, "Unsupported tax mode")
+    if "tax_rate" in data and data["tax_rate"] is not None and not (0 <= data["tax_rate"] <= 100):
+        raise HTTPException(422, "tax_rate must be between 0 and 100")
+    effective_mode = data.get("tax_mode")
+    if effective_mode in ("included", "excluded") and data.get("tax_rate") is None:
+        # only enforce this when tax_mode is being set/changed in THIS request to included/excluded;
+        # if tax_mode isn't in this patch at all, don't block unrelated field updates.
+        if "tax_mode" in data:
+            raise HTTPException(422, "tax_rate is required for included or excluded tax")
     if not data:
         return {"ok": True}
     sets = ", ".join(f"{k}=${i + 2}" for i, k in enumerate(data))

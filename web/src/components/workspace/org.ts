@@ -3,7 +3,8 @@ import type { Role } from "@/components/app/session";
 export type OrgBranch = { id: string; name: string; name_ar: string | null; city: string | null; area: string | null; opened_at: string | null };
 export type OrgFull = {
   id: string; name: string; name_ar: string | null; slug: string; industry: string; city: string | null; country: string; currency: string; locale: string;
-  plan: string; tax_number: string | null; is_demo: boolean; created_at: string; monthly_rent: number | null; opening_cash: number | null;
+  plan: string; tax_number: string | null; tax_mode: "none" | "from_file" | "included" | "excluded"; tax_rate: number | null;
+  is_demo: boolean; created_at: string; monthly_rent: number | null; opening_cash: number | null;
   branches: OrgBranch[]; role: Role;
   usage: { uploads_30d: number; rows_30d: number; ai_calls_30d: number; members: number };
 };
