@@ -81,3 +81,39 @@ class ConnectReadTests(unittest.TestCase):
             self.assertEqual(_config_for("lab_web")["base_url"], env["IDRAK_LAB_BASE_URL"])
             adapter = build_adapter({"provider_code": "lab_web", "config": {}}, "org")
             self.assertTrue(adapter.authorization.startswith("Basic "))
+
+
+class ConnectGuardTests(unittest.TestCase):
+    """Disconnected connections and unpaired Lab URLs must never reach a source."""
+    def setUp(self):
+        self.ctx = Ctx(User("user", "user@example.org", None, False), "org", "manager")
+        app.dependency_overrides[org_ctx] = lambda: self.ctx
+        self.pool_patch = patch.object(db, "init_pool", new_callable=AsyncMock)
+        self.pool_patch.start()
+        app.middleware_stack = None
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        self.pool_patch.stop()
+        app.middleware_stack = None
+
+    def test_test_connection_refuses_disconnected(self):
+        from app.services.pos import pipeline
+        row = {"id": "c1", "org_id": "org", "provider_code": "lab_pos", "status": "disconnected",
+               "config": {"base_url": "https://idrak-connect-lab.vercel.app"}, "account_ref": "default"}
+        with patch.object(db, "fetchrow", new=AsyncMock(return_value=row)), \
+                patch.object(pipeline, "test_connection", new=AsyncMock()) as probe:
+            response = self.client.post("/integrations/connections/c1/test")
+        self.assertEqual(response.status_code, 409)
+        probe.assert_not_awaited()
+
+    def test_unpaired_lab_connection_refused_on_serverless(self):
+        provider = {"code": "lab_pos", "is_implemented": True}
+        with patch.dict(os.environ, {"VERCEL": "1", "IDRAK_ENVIRONMENT": "staging", "IDRAK_LAB_BASE_URL": ""}), \
+                patch.object(db, "fetchrow", new=AsyncMock(return_value=provider)), \
+                patch.object(db, "execute", new=AsyncMock()) as write:
+            response = self.client.post("/integrations/connections", json={"provider_code": "lab_pos"})
+        self.assertEqual(response.status_code, 400)
+        write.assert_not_awaited()

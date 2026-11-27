@@ -71,6 +71,39 @@ def lab_origin():
     return origin
 
 
+LOOPBACK_HOSTS = ('127.0.0.1', 'localhost')
+
+
+def legacy_lab_base_url(stored):
+    """Validate the stored base_url of an UNPAIRED (local-demo) Lab connection.
+
+    Allowed: a plain-HTTP loopback Lab for local development (never on a
+    serverless host, where loopback is meaningless and only an SSRF risk), or
+    exactly the active configured Lab origin. Anything else, including the
+    published Lab whenever a different Lab origin is configured, raises
+    ValueError before any request is made. Paired connections are validated
+    separately against lab_origin().
+    """
+    from . import lab
+    value = stored or lab.DEFAULT_BASE_URL
+    if not isinstance(value, str):
+        raise ValueError('Lab URL not allowed')
+    parts = urlsplit(value)
+    if (parts.scheme == 'http' and parts.hostname in LOOPBACK_HOSTS and parts.username is None
+            and parts.password is None and not parts.query and not parts.fragment and parts.path in ('', '/')):
+        if os.environ.get('VERCEL'):
+            raise ValueError('Lab URL not allowed on this server')
+        return value.rstrip('/')
+    try:
+        origin = _canonical_origin(value.rstrip('/'))
+        active = lab_origin()
+    except ValueError:
+        raise ValueError('Lab URL not allowed') from None
+    if origin != active:
+        raise ValueError('Lab URL not allowed')
+    return origin
+
+
 def configured_origin():
     try:
         return lab_origin()
