@@ -12,6 +12,8 @@ import { timeAgo } from "@/lib/format";
 import { toast } from "@/components/ui/toast";
 import { PageHeader, Section, Stat, StatSkeleton, Table, ErrorBox, N, useName, type Col } from "@/components/app/kit";
 import { Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
+import { useSession } from "@/components/app/session";
+import LabPairing from "@/components/app/LabPairing";
 
 type Provider = {
   code: string; name: string; name_ar: string | null; category: string;
@@ -24,11 +26,12 @@ type Job = {
   counts: Counts; error: string | null; started_at: string; finished_at: string | null;
 };
 type Connection = {
+  account_ref?: string;
   id: string; provider_code: string; provider_name: string; provider_name_ar: string | null;
   provider_category: string; display_name: string; status: "pending" | "connected" | "paused" | "error" | "disconnected";
   last_sync_at: string | null; last_success_at: string | null; last_error: string | null;
   sync_count: number; open_errors: number; sales_count?: number; recent_jobs?: Job[];
-  config?: { channel?: string; auto_sync?: boolean } | null;
+  config?: { channel?: string; auto_sync?: boolean; paired_lab?: boolean } | null;
 };
 type TestCheck = { name: string; ok: boolean; detail: string };
 type TestResult = { ok: boolean; checks: TestCheck[]; capabilities?: Record<string, boolean> };
@@ -45,6 +48,8 @@ const CATEGORY_ICON: Record<string, React.ComponentType<{ size?: number; classNa
 
 export default function IntegrationsPage() {
   const tx = useTx();
+  const { can, org, session } = useSession();
+  const canManage = can("manager");
   const name = useName();
   const providersQ = useApiQuery<Provider[]>("/integrations/providers");
   // تحديث حيّ: حالة الاتصالات وعدّادات المزامنة تتحدّث مع المزامنة التلقائية بلا إعادة تحميل.
@@ -71,6 +76,8 @@ export default function IntegrationsPage() {
           "Connect a compatible point-of-sale system and IDRAK pulls your sales, products, and returns automatically — less manual exporting, fewer missed days.",
           "اربط نظام نقطة بيع متوافق وإدراك بيسحب مبيعاتك وأصنافك ومرتجعاتك تلقائيًا — تصدير يدوي أقل، وأيام أقلّ تضيع.")}
       />
+
+      {canManage && org && session && <LabPairing key={`${session.user.id}:${org.id}`} onPaired={() => { void connsQ.refetch(); }} />}
 
       {connsQ.error ? <ErrorBox error={connsQ.error} retry={() => connsQ.refetch()} /> : (
         <>
@@ -130,6 +137,7 @@ export default function IntegrationsPage() {
                 {providers.map((p) => {
                   const Icon = CATEGORY_ICON[p.category] || Cloud;
                   const connectable = p.is_implemented;
+                  const isLab = p.code === "lab_pos" || p.code === "lab_web";
                   return (
                     <div key={p.code}
                       className={clsx("flex flex-col rounded-xl border p-4",
@@ -150,8 +158,13 @@ export default function IntegrationsPage() {
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-2">
                         <CapabilityTags caps={p.capabilities} />
-                        {connectable ? (
-                          <Button size="sm" loading={connect.isPending}
+                        {isLab ? (
+                          <Button size="sm" variant="secondary" disabled={!canManage}
+                            onClick={() => document.getElementById("lab-pairing")?.scrollIntoView({ behavior: "smooth" })}>
+                            <Link2 size={14} />{tx("Pair your shop above", "اربط محلك من الأعلى")}
+                          </Button>
+                        ) : connectable ? (
+                          <Button size="sm" loading={connect.isPending} disabled={!canManage}
                             onClick={() => connect.mutate({ provider_code: p.code })}
                             data-basira={`connect-${p.code}`}>
                             <Link2 size={14} />{tx("Connect", "اربط")}
@@ -219,6 +232,7 @@ const JOB_TONE: Record<Job["status"], "olive" | "saffron" | "danger" | "neutral"
 
 function ConnectionRow({ conn }: { conn: Connection }) {
   const tx = useTx();
+  const canManage = useSession().can("manager");
   const name = useName();
   const [open, setOpen] = useState(false);
   const [confirmOff, setConfirmOff] = useState(false);
@@ -273,6 +287,7 @@ function ConnectionRow({ conn }: { conn: Connection }) {
           </div>
           <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-ink-3">
             <span>{name(conn.provider_name, conn.provider_name_ar)}</span>
+            {conn.config?.paired_lab && <span dir="ltr" className="font-mono">{conn.account_ref}</span>}
             <span className="inline-flex items-center gap-1">
               {conn.last_success_at ? <CheckCircle2 size={12} className="text-olive" /> : <Clock size={12} />}
               {conn.last_success_at
@@ -286,7 +301,7 @@ function ConnectionRow({ conn }: { conn: Connection }) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {conn.status !== "disconnected" && (
+          {canManage && conn.status !== "disconnected" && (
             <Button size="sm" variant="secondary" loading={sync.isPending} onClick={() => sync.mutate(undefined)}
               data-basira="pos-sync-now">
               <RefreshCw size={14} />{tx("Sync now", "زامن الآن")}
@@ -304,7 +319,7 @@ function ConnectionRow({ conn }: { conn: Connection }) {
         <div className="mt-4 rounded-xl border border-line bg-paper-2/40 p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-[13px] font-medium text-ink-2">{tx("Sync history", "سجلّ المزامنة")}</h4>
-            {conn.status !== "disconnected" && (
+            {canManage && conn.status !== "disconnected" && (
               confirmOff ? (
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] text-ink-3">{tx("Disconnect? Data is kept.", "قطع الاتصال؟ البيانات بتنحفظ.")}</span>
