@@ -2,9 +2,12 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
+import re
 import time
+from urllib.parse import urlsplit
 from uuid import uuid4, UUID
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -13,8 +16,66 @@ from fastapi import HTTPException
 
 from ... import db
 
+# The published Lab. Used when IDRAK_LAB_ORIGIN is unset, which is how
+# production must be configured.
 LAB_ORIGIN = 'https://idrak-connect-lab.vercel.app'
 TTL = 300
+_HOST_RE = re.compile(r'(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+')
+_RESERVED_SUFFIXES = ('.localhost', '.local', '.internal', '.test', '.invalid', '.example', '.lan', '.home.arpa')
+
+
+def _canonical_origin(value):
+    """Return 'https://host' for a bare public HTTPS origin, else raise ValueError.
+
+    No credentials, path, query, fragment, non-443 port, IP literal or
+    local/reserved hostname, so the server can only ever call a named host.
+    """
+    if not isinstance(value, str) or len(value) > 300 or value != value.strip():
+        raise ValueError()
+    parts = urlsplit(value)
+    host = parts.hostname or ''
+    if (parts.scheme != 'https' or parts.username is not None or parts.password is not None
+            or parts.path not in ('', '/') or parts.query or parts.fragment or '@' in parts.netloc):
+        raise ValueError()
+    if parts.port not in (None, 443) or parts.netloc.lower() not in (host, host + ':443'):
+        raise ValueError()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError()  # IP literals are never allowed
+    # The top-level label must contain a letter: blocks shorthand IPs like 127.1 or 2130706433.
+    if (not _HOST_RE.fullmatch(host) or host == 'localhost' or host.endswith(_RESERVED_SUFFIXES)
+            or not re.search('[a-z]', host.rsplit('.', 1)[-1])):
+        raise ValueError()
+    return 'https://' + host
+
+
+def lab_origin():
+    """The single Lab origin this server may contact.
+
+    Unset → the published Lab. Otherwise IDRAK_LAB_ORIGIN must exactly match the
+    published Lab or an origin listed in IDRAK_LAB_ALLOWED_ORIGINS (comma
+    separated, exact origins, no wildcards), e.g. a dedicated staging Lab.
+    Any invalid value fails closed; it never falls back to another origin.
+    """
+    configured = os.environ.get('IDRAK_LAB_ORIGIN', '')
+    if not configured:
+        return LAB_ORIGIN
+    origin = _canonical_origin(configured)
+    allowed = {LAB_ORIGIN} | {_canonical_origin(item.strip())
+                              for item in os.environ.get('IDRAK_LAB_ALLOWED_ORIGINS', '').split(',') if item.strip()}
+    if origin not in allowed:
+        raise ValueError()
+    return origin
+
+
+def configured_origin():
+    try:
+        return lab_origin()
+    except ValueError:
+        raise HTTPException(503, 'Lab pairing is not configured') from None
 
 
 def key():
@@ -36,6 +97,7 @@ def cipher():
 
 def new_intent(org_id, user_id):
     cipher()  # Fail before issuing a request that cannot be persisted securely.
+    configured_origin()  # ...or redeemed against a valid Lab origin.
     data = {'aud': 'idrak-lab-pairing-v1', 'org': str(org_id), 'user': str(user_id),
             'nonce': str(uuid4()), 'exp': int(time.time()) + TTL}
     encoded = base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':')).encode()).decode()
@@ -77,12 +139,12 @@ def validate_credentials(data, org_id):
         raise HTTPException(502, 'Invalid Lab pairing response') from None
 
 
-async def exchange_remote(code, intent):
+async def exchange_remote(code, intent, origin):
     raw = json.dumps({'code': code, 'intent': intent, 'timestamp': int(time.time())}, separators=(',', ':')).encode()
     authorization = 'LabPairing ' + hmac.new(key(), b'exchange:' + raw, hashlib.sha256).hexdigest()
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
-            response = await client.post(LAB_ORIGIN + '/service/pairing/exchange', content=raw,
+            response = await client.post(origin + '/service/pairing/exchange', content=raw,
                                          headers={'Authorization': authorization, 'Content-Type': 'application/json'})
         if response.status_code in (400, 401, 403, 409):
             raise HTTPException(409, 'Pairing code is invalid, expired, already used or belongs to another organization')
@@ -96,8 +158,9 @@ async def exchange_remote(code, intent):
 
 async def redeem(code, intent, ctx):
     validate_intent(intent, ctx.org_id, ctx.user.id)
+    origin = configured_origin()
     encryption = cipher()
-    credentials = validate_credentials(await exchange_remote(code, intent), ctx.org_id)
+    credentials = validate_credentials(await exchange_remote(code, intent, origin), ctx.org_id)
     shop = credentials['shop_id']
     encrypted = encryption.encrypt(json.dumps(credentials).encode()).decode()
     connections = []
@@ -114,7 +177,7 @@ async def redeem(code, intent, ctx):
             row = await c.fetchrow('''SELECT id FROM pos_connections WHERE org_id=$1 AND provider_code=$2
                                       AND account_ref=$3 ORDER BY created_at LIMIT 1 FOR UPDATE''', ctx.org_id, provider, shop)
             config = {'paired_lab': True, 'channel': channel, 'sales_adjust_inventory': False,
-                      'auto_sync': True, 'base_url': LAB_ORIGIN}
+                      'auto_sync': True, 'base_url': origin}  # binds these credentials to this Lab
             if row:
                 cid = row['id']
                 await c.execute("UPDATE pos_connections SET status='connected',config=$3,updated_at=now() WHERE id=$1 AND org_id=$2",

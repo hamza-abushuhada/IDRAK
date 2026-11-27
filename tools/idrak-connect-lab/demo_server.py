@@ -30,7 +30,17 @@ RECEIVER_DB = DATA / 'simulated_idrak.sqlite3'
 HOST = '127.0.0.1'
 SOURCE_PORT = int(os.environ.get('IDRAK_LAB_SOURCE_PORT', '8765'))
 RECEIVER_PORT = int(os.environ.get('IDRAK_LAB_RECEIVER_PORT', '8766'))
-SIGNING_SECRET = os.environ.get('IDRAK_LAB_WEBHOOK_SECRET', 'idrak-local-demo-only-secret')
+# The public default exists only so the localhost demo starts with no setup.
+# It is never acceptable for hosted/serverless runs or for pairing (see
+# signing_secret_is_safe), because anything signed with it is forgeable.
+DEFAULT_SIGNING_SECRET = 'idrak-local-demo-only-secret'
+SIGNING_SECRET = os.environ.get('IDRAK_LAB_WEBHOOK_SECRET', DEFAULT_SIGNING_SECRET)
+
+
+def signing_secret_is_safe(value=None):
+    """True only for a deployment-specific secret: at least 32 chars, never the public default."""
+    value = SIGNING_SECRET if value is None else value
+    return isinstance(value, str) and len(value) >= 32 and value != DEFAULT_SIGNING_SECRET
 SEED_PRODUCTS = [
     ('BRG-001','برغر كلاسيك','Classic Burger','🍔',4250,60),
     ('BRG-002','تشيز برغر','Cheese Burger','🧀',5250,60),

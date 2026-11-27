@@ -22,7 +22,7 @@ class PairingSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.org, self.user = str(uuid4()), str(uuid4())
         self.credentials = {'shop_id': 'shop-test-a', 'org_id': self.org,
                             'token': 'lc.shop-test-a.' + 's' * 43, 'webhook_secret': 'b' * 64}
-        self.conn = {'provider_code': 'lab_pos', 'account_ref': 'shop-test-a', 'config': {'paired_lab': True, 'base_url': 'http://evil.invalid'}}
+        self.conn = {'provider_code': 'lab_pos', 'account_ref': 'shop-test-a', 'config': {'paired_lab': True, 'base_url': pairing.LAB_ORIGIN}}
 
     def test_intent_bound_to_user_organization_and_expiry(self):
         value = pairing.new_intent(self.org, self.user)['intent']
@@ -54,6 +54,11 @@ class PairingSecurityTests(unittest.IsolatedAsyncioTestCase):
     def test_fixed_origin_redirect_refusal_and_scoped_webhook(self):
         adp = pipeline.build_adapter({**self.conn, '_lab_credentials': self.credentials}, self.org)
         self.assertEqual(adp.base_url, pairing.LAB_ORIGIN)
+        # A connection paired against another Lab is never contacted with these credentials.
+        for stored in ('http://evil.invalid', 'https://other-lab.example.org', None):
+            with self.assertRaisesRegex(ValueError, 'origin changed'):
+                pipeline.build_adapter({**self.conn, 'config': {'paired_lab': True, 'base_url': stored},
+                                        '_lab_credentials': self.credentials}, self.org)
         with self.assertRaises(ValueError):
             pipeline.build_adapter({**self.conn, '_lab_credentials': self.credentials}, str(uuid4()))
         opener = Mock()
@@ -67,3 +72,83 @@ class PairingSecurityTests(unittest.IsolatedAsyncioTestCase):
                        {'account_id': 'shop-test-a', 'channel': 'web', 'system': 'idrak-lab-store'}):
             body = json.dumps({'source': source}).encode()
             self.assertFalse(adp.verify_webhook({'X-Idrak-Signature': adp.signature_for(body)}, body))
+
+
+class LabOriginTests(unittest.IsolatedAsyncioTestCase):
+    STAGING = 'https://idrak-lab-staging.vercel.app'
+
+    def env(self, **values):
+        base = {'IDRAK_LAB_ORIGIN': '', 'IDRAK_LAB_ALLOWED_ORIGINS': ''}
+        return patch.dict(os.environ, {**base, **values})
+
+    def test_default_is_published_lab(self):
+        with self.env():
+            self.assertEqual(pairing.lab_origin(), 'https://idrak-connect-lab.vercel.app')
+        with self.env(IDRAK_LAB_ORIGIN='https://idrak-connect-lab.vercel.app'):
+            self.assertEqual(pairing.lab_origin(), pairing.LAB_ORIGIN)
+
+    def test_staging_origin_requires_explicit_allowlist(self):
+        with self.env(IDRAK_LAB_ORIGIN=self.STAGING):
+            with self.assertRaises(ValueError):
+                pairing.lab_origin()
+        with self.env(IDRAK_LAB_ORIGIN=self.STAGING, IDRAK_LAB_ALLOWED_ORIGINS='https://a.example.org, ' + self.STAGING):
+            self.assertEqual(pairing.lab_origin(), self.STAGING)
+        with self.env(IDRAK_LAB_ORIGIN=self.STAGING + ':443/', IDRAK_LAB_ALLOWED_ORIGINS=self.STAGING):
+            self.assertEqual(pairing.lab_origin(), self.STAGING)
+        # No wildcard/suffix matching: a sibling host is not allowed.
+        with self.env(IDRAK_LAB_ORIGIN='https://evil-idrak-lab-staging.vercel.app', IDRAK_LAB_ALLOWED_ORIGINS=self.STAGING):
+            with self.assertRaises(ValueError):
+                pairing.lab_origin()
+
+    def test_unsafe_origins_rejected_even_when_allowlisted(self):
+        bad = ['http://idrak-lab-staging.vercel.app', 'https://idrak-lab-staging.vercel.app/path',
+               'https://idrak-lab-staging.vercel.app/?x=1', 'https://idrak-lab-staging.vercel.app#f',
+               'https://user:pw@idrak-lab-staging.vercel.app', 'https://idrak-lab-staging.vercel.app:8443',
+               'https://127.0.0.1', 'https://[::1]', 'https://10.0.0.5', 'https://169.254.169.254',
+               'https://127.1', 'https://2130706433', 'https://localhost', 'https://lab.localhost',
+               'https://metadata.internal', 'https://lab.local', ' https://idrak-lab-staging.vercel.app',
+               'https://idrak-lab-staging.vercel.app@evil.example.org', 'file:///etc/passwd', 'ftp://x.example.org',
+               'https://exa_mple.org', 'https://-bad.example.org', 'javascript:alert(1)']
+        for value in bad:
+            with self.env(IDRAK_LAB_ORIGIN=value, IDRAK_LAB_ALLOWED_ORIGINS=value):
+                with self.assertRaises(ValueError, msg=value):
+                    pairing.lab_origin()
+        # One bad allowlist entry fails closed instead of being silently skipped.
+        with self.env(IDRAK_LAB_ORIGIN=self.STAGING, IDRAK_LAB_ALLOWED_ORIGINS=self.STAGING + ',http://127.0.0.1'):
+            with self.assertRaises(ValueError):
+                pairing.lab_origin()
+
+    async def test_misconfigured_origin_fails_closed_without_network(self):
+        keys = {'IDRAK_LAB_PAIRING_KEY': 'unit-test-pairing-only-' + 'a' * 40,
+                'IDRAK_CONNECT_ENCRYPTION_KEY': Fernet.generate_key().decode()}
+        with self.env(IDRAK_LAB_ORIGIN='https://169.254.169.254', **keys),                 patch.object(pairing.httpx, 'AsyncClient') as client:
+            with self.assertRaises(HTTPException) as caught:
+                pairing.new_intent(str(uuid4()), str(uuid4()))
+            self.assertEqual(caught.exception.status_code, 503)
+            client.assert_not_called()
+
+    async def test_redeem_contacts_and_binds_configured_origin(self):
+        org, user = str(uuid4()), str(uuid4())
+        keys = {'IDRAK_LAB_PAIRING_KEY': 'unit-test-pairing-only-' + 'a' * 40,
+                'IDRAK_CONNECT_ENCRYPTION_KEY': Fernet.generate_key().decode()}
+        with self.env(IDRAK_LAB_ORIGIN=self.STAGING, IDRAK_LAB_ALLOWED_ORIGINS=self.STAGING, **keys):
+            intent = pairing.new_intent(org, user)['intent']
+            seen = []
+
+            class Client:
+                def __init__(self, **kwargs):
+                    assert kwargs['follow_redirects'] is False and kwargs['trust_env'] is False
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *exc):
+                    return False
+                async def post(self, url, **kwargs):
+                    seen.append(url)
+                    raise pairing.httpx.ConnectError('offline')
+
+            from app.auth import Ctx, User
+            with patch.object(pairing.httpx, 'AsyncClient', Client):
+                with self.assertRaises(HTTPException) as caught:
+                    await pairing.redeem('c' * 43, intent, Ctx(User(user, '', None, False), org, 'manager'))
+            self.assertEqual(caught.exception.status_code, 502)
+            self.assertEqual(seen, [self.STAGING + '/service/pairing/exchange'])

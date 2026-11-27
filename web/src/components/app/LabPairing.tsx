@@ -6,8 +6,8 @@ import { useTx } from "@/i18n";
 import { API_URL, ApiError, getOrgId } from "@/lib/api";
 import { useSession } from "@/components/app/session";
 import { Button, Card, Input, Textarea } from "@/components/ui";
+import { LAB_LOGIN_URL } from "@/lib/labUrl";
 
-const LAB_URL = "https://idrak-connect-lab.vercel.app/login";
 type Intent = { intent: string; expires_at: number };
 type Paired = { shop_id: string; connections: { id: string; provider_code: string }[] };
 
@@ -120,7 +120,7 @@ export default function LabPairing({ onPaired }: { onPaired: () => void }) {
     </div> : intent ? <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" variant="secondary" onClick={copy}><Copy size={15} />{tx("Copy request", "نسخ طلب الربط")}</Button>
-        <a href={LAB_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sm text-terra underline"><ExternalLink size={14} />{tx("Open the Lab", "فتح المحاكي")}</a>
+        {LAB_LOGIN_URL && <a href={LAB_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sm text-terra underline"><ExternalLink size={14} />{tx("Open the Lab", "فتح المحاكي")}</a>}
         <span className="text-sm text-ink-3" role="timer">{tx("Expires in", "ينتهي خلال")} {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</span>
       </div>
       <details><summary className="cursor-pointer text-sm text-ink-3">{tx("Show request for manual copying", "عرض الطلب للنسخ اليدوي")}</summary>

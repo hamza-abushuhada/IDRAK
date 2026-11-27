@@ -87,8 +87,22 @@ class HostedLabTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 hosted.validate_settings()
         with patch.dict(os.environ, {'IDRAK_LAB_ACCESS_PASSWORD': 'a' * 24,
-                                     'IDRAK_LAB_WEBHOOK_SECRET': 'b' * 40}, clear=True):
+                                     'IDRAK_LAB_WEBHOOK_SECRET': 'b' * 40}, clear=True), \
+                patch.object(lab, 'SIGNING_SECRET', 'b' * 40):
             self.assertEqual(hosted.validate_settings()[0], 'lab')
+        # The value used for signing must be the validated one, never the public default.
+        for effective in (lab.DEFAULT_SIGNING_SECRET, 'c' * 40):
+            with patch.dict(os.environ, {'IDRAK_LAB_ACCESS_PASSWORD': 'a' * 24,
+                                         'IDRAK_LAB_WEBHOOK_SECRET': 'b' * 40}, clear=True), \
+                    patch.object(lab, 'SIGNING_SECRET', effective):
+                with self.assertRaises(ValueError):
+                    hosted.validate_settings()
+        for secret in (lab.DEFAULT_SIGNING_SECRET, 'short-secret'):
+            with patch.dict(os.environ, {'IDRAK_LAB_ACCESS_PASSWORD': 'a' * 24,
+                                         'IDRAK_LAB_WEBHOOK_SECRET': secret}, clear=True), \
+                    patch.object(lab, 'SIGNING_SECRET', secret):
+                with self.assertRaises(ValueError):
+                    hosted.validate_settings()
         with patch.dict(os.environ, {'IDRAK_LAB_ACCESS_PASSWORD': 'a' * 40,
                                      'IDRAK_LAB_WEBHOOK_SECRET': 'a' * 40}, clear=True):
             with self.assertRaises(ValueError):

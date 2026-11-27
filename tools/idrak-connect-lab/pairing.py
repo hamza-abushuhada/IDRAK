@@ -24,8 +24,13 @@ CREATE TABLE IF NOT EXISTS lab_bindings (
 
 
 def key():
+    # Pairing hands IDRAK a per-shop webhook key derived from SIGNING_SECRET, so
+    # refuse to pair at all unless that secret is deployment-specific. This holds
+    # for every entry point, including the localhost demo server.
+    if not lab.signing_secret_is_safe():
+        raise lab.LabAuthError(503, 'Pairing is not configured')
     value = os.environ.get('IDRAK_LAB_PAIRING_KEY', '')
-    if len(value) < 32 or value == lab.SIGNING_SECRET:
+    if len(value) < 32 or value in (lab.SIGNING_SECRET, os.environ.get('IDRAK_LAB_ACCESS_PASSWORD')):
         raise lab.LabAuthError(503, 'Pairing is not configured')
     return value.encode()
 
