@@ -50,7 +50,7 @@ class ProductFilters(unittest.TestCase):
         async def data_end(org_id):
             return dt.date(2026, 11, 22)
 
-        for target, name, fake in ((db, "fetch", fetch), (insights_service, "data_end", data_end)):
+        for target, name, fake in ((db, "fetch", fetch), (insights_service, "data_end", data_end), (insights_service, "window_end", data_end)):
             p = mock.patch.object(target, name, fake)
             p.start()
             self.addCleanup(p.stop)
