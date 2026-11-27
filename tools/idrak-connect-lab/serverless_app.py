@@ -24,7 +24,7 @@ app = FastAPI(title='IDRAK Connect Lab — isolated simulator', docs_url=None, r
 @app.middleware('http')
 async def authentication(request, call_next):
     path = request.url.path
-    public = path in ('/login', '/login.js', '/style.css', '/auth/login', '/service/pairing/exchange')
+    public = path in ('/login', '/login.js', '/activate', '/activate.js', '/style.css', '/service/pairing/exchange') + browser_auth.PUBLIC_AUTH_PATHS
     expected = 'Basic ' + base64.b64encode(f'{USER}:{PASSWORD}'.encode()).decode()
     principal = await run_in_threadpool(
         lab.authenticate, request.headers.get('authorization', ''), request.url.path, request.method, expected)
@@ -42,8 +42,10 @@ async def authentication(request, call_next):
             headers['WWW-Authenticate'] = 'Basic realm="IDRAK Connect Lab", charset="UTF-8"'
         return Response(status_code=401, headers=headers)
     request.state.principal = principal
+    if request.method == 'GET' and not lab.page_allowed(principal, path):
+        return Response(status_code=303, headers={'Location': '/pos', 'Cache-Control': 'no-store'})
     if request.method == 'POST':
-        if not browser_auth.same_origin(request.headers, str(request.base_url), cookie_auth=cookie_principal is not None or path == '/auth/login'):
+        if not browser_auth.same_origin(request.headers, str(request.base_url), cookie_auth=cookie_principal is not None or path in browser_auth.PUBLIC_AUTH_PATHS):
             return JSONResponse({'error': 'Cross-origin writes are not allowed'}, status_code=403)
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
@@ -66,15 +68,12 @@ def static_file(filename):
 
 
 def dispatch_get(principal, x_shop, path, query):
-    files = {'/login': 'login.html', '/login.js': 'login.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
+    files = {'/login': 'login.html', '/login.js': 'login.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
              '/style.css': 'style.css', '/app.js': 'app.js', '/simulator': 'inbox.html', '/simulator/': 'inbox.html'}
     if path in files:
         return static_file(files[path])
     if path == '/auth/session':
-        shop = lab.effective_shop(principal, x_shop)
-        with lab.connect(lab.SOURCE_DB) as db:
-            name = db.execute('SELECT name FROM shops WHERE shop_id=?', (shop,)).fetchone()['name']
-        return JSONResponse({'name': name, 'shop_id': shop, 'kind': principal.kind})
+        return JSONResponse(browser_auth.session_info(principal, x_shop))
     if path == '/health':
         with lab.connect(lab.SOURCE_DB) as db:
             db.execute('SELECT sku FROM products LIMIT 0')
@@ -103,14 +102,13 @@ async def dispatch(path: str, request: Request):
         value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError('Expected a JSON object')
-        if path == 'auth/login':
-            session = await run_in_threadpool(browser_auth.login, value.get('token'))
-            response = JSONResponse({'ok': True})
-            response.headers['Set-Cookie'] = browser_auth.cookie_header(session, request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
-            return response
-        if path == 'auth/logout':
-            response = JSONResponse({'ok': True})
-            response.headers['Set-Cookie'] = browser_auth.cookie_header('', request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
+        if path.startswith('auth/'):
+            client = request.headers.get('x-real-ip') or (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()                 or (request.client.host if request.client else '')
+            status, payload, cookie = await run_in_threadpool(
+                browser_auth.handle_auth_post, '/' + path, value, request.state.principal if path in ('auth/logout', 'auth/switch-shop') else None, client)
+            response = JSONResponse(payload, status_code=status)
+            if cookie is not None:
+                response.headers['Set-Cookie'] = browser_auth.cookie_header(cookie, request.url.scheme == 'https' or request.url.hostname not in ('localhost', '127.0.0.1', '::1'))
             return response
         return JSONResponse(await run_in_threadpool(
             lab.handle_source_post, request.state.principal, request.headers.get('x-lab-shop'), '/' + path, value))

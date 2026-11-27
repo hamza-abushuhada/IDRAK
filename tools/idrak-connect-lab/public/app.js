@@ -22,15 +22,59 @@ async function api(path,options={}){
 fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
   if(!session)return;
   const nav=document.querySelector('.nav');
-  const label=document.createElement('span');label.className='pill';label.textContent=session.name;
-  nav?.append(label);
+  const owner=session.role!=='cashier';
+  if(!owner){
+    // Cashiers only see the POS. The server enforces this too.
+    document.querySelectorAll('a[href="/shop"],a[href="/admin"],a[href="/simulator/"],a[href="/"],a[href="http://127.0.0.1:8766/"]').forEach(a=>{if(!a.classList.contains('logo'))a.remove();});
+  }
+  if(session.shops&&session.shops.length>1){
+    const select=document.createElement('select');select.className='shop-switch';select.setAttribute('aria-label','المحل الحالي');
+    session.shops.forEach(s=>{const o=document.createElement('option');o.value=s.shop_id;o.textContent=s.name+(s.role==='cashier'?' (كاشير)':'');o.selected=s.shop_id===session.shop_id;select.append(o);});
+    select.onchange=async()=>{const r=await fetch('/auth/switch-shop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop_id:select.value})});if(r.ok)location.replace(owner||page==='pos'?location.pathname:'/pos');else toast('تعذّر تبديل المحل',true);};
+    nav?.append(select);
+  }else{
+    const label=document.createElement('span');label.className='pill';label.textContent=session.name;nav?.append(label);
+  }
+  if(session.email){const who=document.createElement('span');who.className='pill who';who.dir='ltr';who.textContent=session.email+' · '+(owner?'صاحب المحل':'كاشير');nav?.append(who);}
   if(session.kind==='shop'){
-    setupPairing(session, nav);
+    if(owner){setupPairing(session, nav);if(session.via==='password')setupTeam(nav);}
     const button=document.createElement('button');button.className='btn secondary small';button.textContent='تسجيل الخروج';
     button.onclick=async()=>{await fetch('/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});location.replace('/login');};
     nav?.append(button);
   }
 }).catch(()=>{});
+
+function setupTeam(nav){
+  const open=document.createElement('button');open.type='button';open.className='btn secondary small';open.textContent='الفريق';nav?.append(open);
+  const dialog=document.createElement('dialog');dialog.className='pairing-dialog';dialog.setAttribute('aria-labelledby','team-title');document.body.append(dialog);
+  async function draw(){
+    dialog.innerHTML=`<div class="row"><h2 id="team-title">فريق المحل</h2><button class="btn secondary small" type="button" id="team-close">إغلاق</button></div>
+      <p class="muted">أضف موظف كاشير ببريده. سيحصل على رابط دعوة لمرة واحدة صالح 48 ساعة ليختار كلمة مروره بنفسه.</p>
+      <form id="team-form"><label for="team-email">بريد موظف الكاشير</label><input id="team-email" type="email" dir="ltr" required maxlength="254" autocomplete="off"><button class="btn" type="submit">إنشاء رابط دعوة</button></form>
+      <div id="team-link" hidden><label for="team-url">رابط الدعوة (يظهر مرة واحدة)</label><input id="team-url" dir="ltr" readonly><button class="btn secondary" type="button" id="team-copy">نسخ الرابط</button></div>
+      <p id="team-error" role="alert"></p><h3>الأعضاء</h3><div id="team-list" class="list"></div>`;
+    dialog.querySelector('#team-close').onclick=()=>dialog.close();
+    dialog.querySelector('#team-form').onsubmit=async e=>{
+      e.preventDefault();const input=dialog.querySelector('#team-email');dialog.querySelector('#team-error').textContent='';
+      try{const r=await api('/api/team/invite',{method:'POST',body:JSON.stringify({email:input.value.trim(),role:'cashier'})});
+        input.value='';const url=dialog.querySelector('#team-url');url.value=location.origin+'/activate#token='+encodeURIComponent(r.token);
+        dialog.querySelector('#team-link').hidden=false;url.focus();url.select();await list();}
+      catch(err){dialog.querySelector('#team-error').textContent=err.message;}
+    };
+    dialog.querySelector('#team-copy').onclick=async()=>{const url=dialog.querySelector('#team-url');try{await navigator.clipboard.writeText(url.value);toast('نُسخ رابط الدعوة');}catch{url.select();}};
+    await list();
+  }
+  async function list(){
+    const node=dialog.querySelector('#team-list');
+    try{const t=await api('/api/team');
+      node.innerHTML=t.members.map(m=>`<div class="order"><div><h3 dir="ltr">${esc(m.email)}</h3><p>${m.role==='owner'?'صاحب المحل':'كاشير'}</p></div>${m.role==='cashier'?`<button class="btn secondary small" data-remove="${esc(m.user_id)}">إزالة</button>`:''}</div>`).join('')
+        +t.pending_invites.map(i=>`<div class="order"><div><h3 dir="ltr">${esc(i.email)}</h3><p>دعوة بانتظار التفعيل</p></div></div>`).join('')||'<div class="empty">لا يوجد أعضاء بعد</div>';
+      node.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{try{await api('/api/team/remove',{method:'POST',body:JSON.stringify({user_id:b.dataset.remove})});await list();}catch(err){toast(err.message,true);}});
+    }catch(err){node.textContent=err.message;}
+  }
+  dialog.addEventListener('close',()=>dialog.replaceChildren());
+  open.onclick=()=>{dialog.showModal();draw();};
+}
 
 function setupPairing(session, nav){
   const open=document.createElement('button');open.type='button';open.className='btn small';open.textContent='ربط مع IDRAK';
