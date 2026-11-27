@@ -9,6 +9,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import hashlib
 import os
 
 from .. import db
@@ -48,6 +49,55 @@ _CONN_COLS = ("c.id, c.provider_code, c.account_ref, c.display_name, c.status, c
              "c.last_success_at, c.last_error, c.sync_count, c.created_at, c.updated_at")
 
 
+_PUBLIC_CONFIG = ("channel", "auto_sync", "paired_lab")
+
+
+def _public(conn, ctx: Ctx | None = None) -> dict:
+    """What the browser may see of a connection: no endpoint URLs, cursors or
+    credentials; the source account reference only for integration managers."""
+    if conn is None:
+        return None
+    out = dict(conn)
+    out.pop("cursor", None)
+    cfg = out.get("config") or {}
+    out["config"] = {k: cfg[k] for k in _PUBLIC_CONFIG if k in cfg}
+    # Opaque key that groups the channels (POS + online store) of one source
+    # account for display, without revealing the source's internal id.
+    family = "lab" if out.get("provider_code") in ("lab_pos", "lab_web") else out.get("provider_code", "")
+    out["group_key"] = hashlib.sha256(f"{family}:{conn.get('account_ref') or out.get('id')}".encode()).hexdigest()[:16]
+    if ctx is not None and not ctx.can("manage_integrations"):
+        out.pop("account_ref", None)
+    return out
+
+
+def auto_sync_active() -> bool:
+    """True only when the background scheduler really runs in this deployment.
+    It never runs on serverless hosts, and POS_AUTOSYNC=0 disables it."""
+    return not db.SERVERLESS and os.getenv("POS_AUTOSYNC", "1") != "0"
+
+
+@router.get("/status")
+async def integration_status(ctx: Ctx = Depends(require("view_dashboard"))):
+    return {"auto_sync_active": auto_sync_active()}
+
+
+class RenameIn(BaseModel):
+    display_name: str
+
+
+@router.patch("/connections/{conn_id}")
+async def rename_connection(conn_id: str, body: RenameIn, ctx: Ctx = Depends(require("manage_integrations"))):
+    name = " ".join((body.display_name or "").split())
+    if not 1 <= len(name) <= 60 or any(ord(ch) < 32 for ch in name):
+        raise HTTPException(400, "Name must be 1-60 characters")
+    done = await db.fetchval("update pos_connections set display_name=$3, updated_at=now() where id=$1 and org_id=$2 returning id",
+                             conn_id, ctx.org_id, name)
+    if not done:
+        raise HTTPException(404, "Connection not found")
+    await db.audit(ctx.org_id, ctx.user.id, "pos.renamed", "pos_connection", conn_id, {"display_name": name})
+    return _public(await _detail(conn_id, ctx.org_id), ctx)
+
+
 @router.get("/providers")
 async def providers(ctx: Ctx = Depends(require("view_dashboard"))):
     """كتالوج الموصّلات: منفَّذ (demo) مقابل مدعوم معماريّاً (coming_soon)."""
@@ -59,12 +109,13 @@ async def providers(ctx: Ctx = Depends(require("view_dashboard"))):
 
 @router.get("/connections")
 async def list_connections(ctx: Ctx = Depends(require("view_dashboard"))):
-    return await db.fetch(
+    rows = await db.fetch(
         f"""select {_CONN_COLS},
                   p.name as provider_name, p.name_ar as provider_name_ar, p.category as provider_category,
                   (select count(*) from pos_sync_errors e where e.connection_id=c.id and e.status='open') open_errors
            from pos_connections c join pos_providers p on p.code=c.provider_code
            where c.org_id=$1 order by c.created_at desc""", ctx.org_id)
+    return [_public(r, ctx) for r in rows]
 
 
 class ConnectIn(BaseModel):
@@ -139,7 +190,7 @@ async def create_connection(body: ConnectIn, ctx: Ctx = Depends(require("manage_
         conn = await db.fetchrow(f"select {_CONN_COLS} from pos_connections c where c.id=$1 and c.org_id=$2", str(cid), ctx.org_id)
         # استئناف تزايديّ من المؤشّر المحفوظ — لا استيراد أوّلي، فلا تكرار.
         result = await pipeline.run_sync(ctx.org_id, ctx.user.id, conn, trigger="manual", initial=False)
-        return {"connection": await _detail(str(cid), ctx.org_id), "sync": result, "reconnected": True}
+        return {"connection": _public(await _detail(str(cid), ctx.org_id), ctx), "sync": result, "reconnected": True}
 
     cid = await db.fetchval(
         """insert into pos_connections(org_id, provider_code, account_ref, display_name, status, config, created_by)
@@ -151,7 +202,7 @@ async def create_connection(body: ConnectIn, ctx: Ctx = Depends(require("manage_
     conn = await db.fetchrow(f"select {_CONN_COLS} from pos_connections c where c.id=$1 and c.org_id=$2", str(cid), ctx.org_id)
     # الاستيراد الأولي يعمل فوراً للموصّل التجريبي (في العملية، سريع).
     result = await pipeline.run_sync(ctx.org_id, ctx.user.id, conn, trigger="initial", initial=True)
-    return {"connection": await _detail(str(cid), ctx.org_id), "sync": result, "reconnected": False}
+    return {"connection": _public(await _detail(str(cid), ctx.org_id), ctx), "sync": result, "reconnected": False}
 
 
 @router.get("/connections/{conn_id}")
@@ -159,7 +210,7 @@ async def get_connection(conn_id: str, ctx: Ctx = Depends(require("view_dashboar
     detail = await _detail(conn_id, ctx.org_id)
     if detail is None:
         raise HTTPException(404, "Connection not found")
-    return detail
+    return _public(detail, ctx)
 
 
 @router.post("/connections/{conn_id}/sync")
@@ -173,7 +224,7 @@ async def sync_now(conn_id: str, ctx: Ctx = Depends(require("manage_integrations
         result = await pipeline.run_sync(ctx.org_id, ctx.user.id, conn, trigger="manual", initial=False)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"connection": await _detail(conn_id, ctx.org_id), "sync": result}
+    return {"connection": _public(await _detail(conn_id, ctx.org_id), ctx), "sync": result}
 
 
 @router.get("/connections/{conn_id}/jobs")
