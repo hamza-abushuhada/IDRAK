@@ -75,8 +75,9 @@ async def import_rows(headers, rows, mapping, entity):
     conn = FakeConn()
     run_row = {"columns": headers, "mapping": mapping, "entity": entity, "stats": {"entity": entity},
                "imported_at": None, "reverted_at": None, "upload_id": str(uuid.uuid4()), "file_name": "f.csv",
-               "batch_id": None, "batch_contract": None, "score_before": {"score": 50}, "score_after": {"score": 90}}
-    fetchrow = mock.AsyncMock(side_effect=[run_row, {"raw_rows": rows}])
+               "batch_id": None, "score_before": {"score": 50}, "score_after": {"score": 90}}
+    # Order matches apply_run: the run row, then the org's tax settings, then the raw rows.
+    fetchrow = mock.AsyncMock(side_effect=[run_row, None, {"raw_rows": rows}])
     with mock.patch.object(data.db, "fetchrow", fetchrow), \
             mock.patch.object(data.db, "fetch", mock.AsyncMock(return_value=[])), \
             mock.patch.object(data.db, "execute", mock.AsyncMock()), \

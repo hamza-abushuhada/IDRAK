@@ -15,9 +15,10 @@ import SettingsNav from "@/components/workspace/SettingsNav";
 import { RoleNote } from "@/components/workspace/common";
 import { CITIES, INDUSTRIES, type OrgFull } from "@/components/workspace/org";
 
-type Form = { name: string; name_ar: string; industry: string; city: string; tax_number: string; monthly_rent: string; opening_cash: string; locale: string };
+type Form = { name: string; name_ar: string; industry: string; city: string; tax_number: string; tax_mode: string; tax_rate: string; monthly_rent: string; opening_cash: string; locale: string };
 const toForm = (o: OrgFull): Form => ({
   name: o.name || "", name_ar: o.name_ar || "", industry: o.industry || "minimarket", city: o.city || "", tax_number: o.tax_number || "",
+  tax_mode: o.tax_mode || "none", tax_rate: o.tax_rate === null || o.tax_rate === undefined ? "" : String(o.tax_rate),
   monthly_rent: o.monthly_rent === null || o.monthly_rent === undefined ? "" : String(o.monthly_rent),
   opening_cash: o.opening_cash === null || o.opening_cash === undefined ? "" : String(o.opening_cash),
   locale: o.locale || "ar",
@@ -70,11 +71,14 @@ function BusinessForm({ org, owner }: { org: OrgFull; owner: boolean }) {
     errorTitle: tx("Couldn't save settings", "ما قدرنا نحفظ الإعدادات"),
     onSuccess: () => { toast(tx("Settings saved", "انحفظت الإعدادات")); refresh(); },
   });
+  const rateMissing = (f.tax_mode === "included" || f.tax_mode === "excluded") && f.tax_rate.trim() === "";
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!owner || !f.name.trim()) return;
+    if (!owner || !f.name.trim() || rateMissing) return;
     save.mutate({
       name: f.name.trim(), name_ar: f.name_ar.trim() || null, industry: f.industry, city: f.city || null, tax_number: f.tax_number.trim() || null,
+      tax_mode: f.tax_mode,
+      tax_rate: (f.tax_mode === "included" || f.tax_mode === "excluded") ? (f.tax_rate === "" ? null : Number(f.tax_rate)) : null,
       monthly_rent: f.monthly_rent === "" ? null : Number(f.monthly_rent), opening_cash: f.opening_cash === "" ? null : Number(f.opening_cash), locale: f.locale,
     });
   };
@@ -106,6 +110,21 @@ function BusinessForm({ org, owner }: { org: OrgFull; owner: boolean }) {
             <Input value={f.tax_number} onChange={up("tax_number")} disabled={!owner} inputMode="numeric" className="num" dir="ltr" />
           </Field>
         </div>
+        <div data-basira="tax-mode-field" className="grid gap-4 sm:grid-cols-2">
+          <Field label={tx("Tax", "الضريبة")} hint={tx("How Idrak calculates tax on your sales. Set this once.", "كيف يحسب إدراك الضريبة على مبيعاتك. تضبطها مرة وحدة.")}>
+            <Select value={f.tax_mode} onChange={up("tax_mode")} disabled={!owner} className="w-full">
+              <option value="none">{tx("No tax", "بدون ضريبة")}</option>
+              <option value="from_file">{tx("Read from file", "من الملف")}</option>
+              <option value="included">{tx("Included in prices", "مشمولة بالأسعار")}</option>
+              <option value="excluded">{tx("Added to prices", "تضاف للأسعار")}</option>
+            </Select>
+          </Field>
+          {(f.tax_mode === "included" || f.tax_mode === "excluded") && (
+            <Field label={tx("Tax rate %", "نسبة الضريبة %")}>
+              <Input type="number" min="0" max="100" step="0.01" value={f.tax_rate} onChange={up("tax_rate")} disabled={!owner} required className="num" />
+            </Field>
+          )}
+        </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <div data-basira="monthly-rent-field">
             <Field label={tx("Monthly rent (JD)", "الإيجار الشهري (د.أ)")} hint={tx("All branches together. Used in cash-flow.", "لكل الفروع مع بعض. بندخله بالتدفق النقدي.")}>
@@ -126,7 +145,7 @@ function BusinessForm({ org, owner }: { org: OrgFull; owner: boolean }) {
         </Field>
         {owner && (
           <div className="flex items-center gap-2 border-t border-line/70 pt-4">
-            <Button type="submit" loading={save.isPending} disabled={!dirty || !f.name.trim()}>{tx("Save changes", "احفظ التغييرات")}</Button>
+            <Button type="submit" loading={save.isPending} disabled={!dirty || !f.name.trim() || rateMissing}>{tx("Save changes", "احفظ التغييرات")}</Button>
             {dirty && <Button type="button" variant="ghost" size="sm" onClick={() => setF(initial)}>{tx("Discard", "تجاهل")}</Button>}
           </div>
         )}
