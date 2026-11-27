@@ -106,7 +106,9 @@ def context(principal, body):
                           'can_approve': m['role'] == 'owner' and not other})
     return {'business': _business_name(data), 'lang': data['lang'], 'email': email, 'expires_at': data['exp'],
             'shops': shops, 'idrak_origin': origin,
-            'cancel_url': callback_url(data, {'error': 'access_denied', 'state': body['state']})}
+            'cancel_url': callback_url(data, {'error': 'access_denied', 'state': body['state']}),
+            # Start over from IDRAK (e.g. the request expired while on this page). No parameters.
+            'retry_url': f"{origin}/{data['lang']}/app/integrations?connect=lab"}
 
 
 def approve(principal, body):

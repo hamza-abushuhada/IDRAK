@@ -92,7 +92,9 @@ def auto_sync_active() -> bool:
 
 @router.get("/status")
 async def integration_status(ctx: Ctx = Depends(require("view_dashboard"))):
-    return {"auto_sync_active": auto_sync_active()}
+    # lab_linking: the UI offers the Lab only where linking is really configured
+    # (e.g. Staging). Demo POS never depends on it.
+    return {"auto_sync_active": auto_sync_active(), "lab_linking": pairing.linking_available()}
 
 
 class RenameIn(BaseModel):
@@ -178,6 +180,10 @@ async def create_connection(body: ConnectIn, ctx: Ctx = Depends(require("manage_
         # Unpaired Lab connections may only target an allowed Lab URL (loopback in
         # local dev). Elsewhere a Lab shop is linked through pairing instead.
         from ..services.pos.pairing import legacy_lab_base_url
+        # On hosted servers a Lab shop is only ever linked with its owner's approval
+        # (redirect or pairing code), never by creating or reactivating a connection here.
+        if db.SERVERLESS or os.environ.get("VERCEL"):
+            raise HTTPException(400, "Connect a Lab shop with its owner's approval")
         try:
             legacy_lab_base_url(_config_for(body.provider_code).get("base_url"))
         except ValueError:

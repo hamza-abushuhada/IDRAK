@@ -44,15 +44,20 @@ function problem(title, text, link) {
 
 const RESTART = () => t('ارجع إلى صفحة IDRAK Connect في إدراك وابدأ الربط من جديد.', 'Go back to IDRAK Connect in IDRAK and start linking again.');
 
+function retryLink() {
+  return ctx && typeof ctx.retry_url === 'string' && ctx.retry_url.startsWith(ctx.idrak_origin + '/')
+    ? { label: t('ابدأ من جديد في إدراك', 'Start again in IDRAK'), href: ctx.retry_url } : null;
+}
+
 function failure(status) {
   if (status === 401) { location.replace('/login?next=connect'); return; }
   sessionStorage.removeItem(KEY);
   if (status === 409) return problem(t('تعذّر إكمال الربط', 'Linking could not be completed'),
-    t('هذا الطلب استُخدم مسبقًا، أو أن المحل مرتبط بمؤسسة أخرى في إدراك. ', 'This request was already used, or the shop is linked to another IDRAK business. ') + RESTART());
+    t('هذا الطلب استُخدم مسبقًا، أو أن المحل مرتبط بمؤسسة أخرى في إدراك. ', 'This request was already used, or the shop is linked to another IDRAK business. ') + RESTART(), retryLink());
   if (status === 403) return problem(t('الموافقة لصاحب المحل فقط', 'Only the shop owner can approve'),
     t('يجب أن يوافق مالك المحل على الربط بحسابه. حساب الكاشير لا يستطيع منح هذه الموافقة.', 'The shop owner must approve with their own account. Cashier accounts cannot grant this.'));
   if (status === 503) return problem(t('الربط غير متاح الآن', 'Linking is unavailable'), t('حاول لاحقًا.', 'Please try again later.'));
-  return problem(t('انتهت صلاحية طلب الربط', 'This link request has expired'), t('طلبات الربط صالحة لدقائق قليلة ولمرة واحدة. ', 'Link requests are valid once, for a few minutes. ') + RESTART());
+  return problem(t('انتهت صلاحية طلب الربط', 'This link request has expired'), t('طلبات الربط صالحة لدقائق قليلة ولمرة واحدة. ', 'Link requests are valid once, for a few minutes. ') + RESTART(), retryLink());
 }
 
 function applyLanguage() {

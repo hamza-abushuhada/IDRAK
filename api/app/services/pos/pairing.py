@@ -138,6 +138,17 @@ def _sign(data):
     return encoded + '.' + hmac.new(key(), b'intent:' + encoded.encode(), hashlib.sha256).hexdigest()
 
 
+def linking_available():
+    """True only when this server can really link a Lab shop (keys, encryption, Lab origin)."""
+    try:
+        key()
+        cipher()
+        lab_origin()
+        return True
+    except (HTTPException, ValueError):
+        return False
+
+
 def new_intent(org_id, user_id):
     cipher()  # Fail before issuing a request that cannot be persisted securely.
     configured_origin()  # ...or redeemed against a valid Lab origin.

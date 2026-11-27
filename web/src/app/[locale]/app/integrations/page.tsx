@@ -11,14 +11,14 @@ import { api, ApiError } from "@/lib/api";
 import { useApiQuery } from "@/lib/useApi";
 import { timeAgo } from "@/lib/format";
 import { toast } from "@/components/ui/toast";
-import { PageHeader, Section, ErrorBox, N } from "@/components/app/kit";
+import { PageHeader, Section, ErrorBox } from "@/components/app/kit";
 import { Badge, Button, Card, Empty, Input, Skeleton } from "@/components/ui";
 import { Drawer } from "@/components/workspace/common";
 import { useSession } from "@/components/app/session";
 import ConnectWizard from "@/components/app/connect/ConnectWizard";
 import { takeFlash, type Flash } from "@/components/app/connect/pending";
 import {
-  friendlyError, groupSystems, type Channel, type ConnectedSystem, type Connection, type Counts, type Job,
+  friendlyError, groupSystems, systemAutoSync, type Channel, type ConnectedSystem, type Connection, type Counts, type Job,
   type Provider, type SystemStatus,
 } from "@/components/app/connect/model";
 
@@ -50,7 +50,7 @@ export default function IntegrationsPage() {
   const { can } = useSession();
   const canManage = can("manager");
   const providersQ = useApiQuery<Provider[]>("/integrations/providers");
-  const statusQ = useApiQuery<{ auto_sync_active: boolean }>("/integrations/status");
+  const statusQ = useApiQuery<{ auto_sync_active: boolean; lab_linking?: boolean }>("/integrations/status");
   const connsQ = useApiQuery<Connection[]>("/integrations/connections", { refetchInterval: 15000, refetchOnWindowFocus: true });
   const [wizard, setWizard] = useState<{ open: boolean; choice: "lab" | null }>({ open: false, choice: null });
   const [manageKey, setManageKey] = useState<string | null>(null);
@@ -67,6 +67,17 @@ export default function IntegrationsPage() {
     void qc.invalidateQueries({ predicate: (q) => /^\/(integrations\/connections|ws\/)/.test(String(q.queryKey[1] || "")) });
   };
   const autoSync = statusQ.data?.auto_sync_active;
+  const labLinking = !!statusQ.data?.lab_linking;
+  // "Try again" from an expired or failed approval returns here with ?connect=lab.
+  useEffect(() => {
+    if (!canManage || !labLinking) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connect") !== "lab") return;
+    params.delete("connect");
+    window.history.replaceState(null, "", window.location.pathname + (params.size ? `?${params}` : ""));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of the URL after mount
+    setWizard({ open: true, choice: "lab" });
+  }, [canManage, labLinking]);
 
   return (
     <div>
@@ -112,7 +123,7 @@ export default function IntegrationsPage() {
             action={canManage ? <Button onClick={() => setWizard({ open: true, choice: null })}><Plus size={16} />{tx("Connect a new system", "ربط نظام جديد")}</Button> : undefined} />
         ) : (
           <div className="divide-y divide-line/60">
-            {systems.map((s) => <SystemCard key={s.key} system={s} canManage={canManage} autoSync={!!autoSync} onManage={() => setManageKey(s.key)} onChanged={refresh} />)}
+            {systems.map((s) => <SystemCard key={s.key} system={s} canManage={canManage} autoSync={systemAutoSync(s, !!autoSync)} onManage={() => setManageKey(s.key)} onChanged={refresh} />)}
           </div>
         )}
       </Section>
@@ -129,11 +140,11 @@ export default function IntegrationsPage() {
       </Card>
 
       {canManage && (
-        <ConnectWizard key={`${wizard.choice}-${wizard.open}`} open={wizard.open} initialChoice={wizard.choice}
+        <ConnectWizard key={`${wizard.choice}-${wizard.open}`} open={wizard.open} initialChoice={wizard.choice} labLinking={labLinking}
           onOpenChange={(o) => setWizard((w) => ({ ...w, open: o }))} providers={providersQ.data} onConnected={refresh} />
       )}
       {managed && (
-        <ManageSystem system={managed} canManage={canManage} autoSync={!!autoSync} onClose={() => setManageKey(null)} onChanged={refresh}
+        <ManageSystem system={managed} canManage={canManage} autoSync={systemAutoSync(managed, !!autoSync)} labLinking={labLinking} onClose={() => setManageKey(null)} onChanged={refresh}
           onReconnect={() => { setManageKey(null); setWizard({ open: true, choice: "lab" }); }} />
       )}
     </div>
@@ -218,13 +229,13 @@ function SystemCard({ system, canManage, autoSync, onManage, onChanged }: {
   );
 }
 
-function ManageSystem({ system, canManage, autoSync, onClose, onChanged, onReconnect }: {
-  system: ConnectedSystem; canManage: boolean; autoSync: boolean; onClose: () => void; onChanged: () => void; onReconnect: () => void;
+function ManageSystem({ system, canManage, autoSync, labLinking, onClose, onChanged, onReconnect }: {
+  system: ConnectedSystem; canManage: boolean; autoSync: boolean; labLinking: boolean; onClose: () => void; onChanged: () => void; onReconnect: () => void;
 }) {
   const tx = useTx();
   const labels = useSystemLabels();
   const [name, setName] = useState(system.customName ?? "");
-  const [busy, setBusy] = useState<"" | "rename" | "test" | "disconnect" | "sync">("");
+  const [busy, setBusy] = useState<"" | "rename" | "test" | "disconnect" | "sync" | "reconnect">("");
   const [error, setError] = useState("");
   const [confirmOff, setConfirmOff] = useState(false);
   const [tests, setTests] = useState<Record<string, boolean | string>>({});
@@ -254,6 +265,14 @@ function ManageSystem({ system, canManage, autoSync, onClose, onChanged, onRecon
     setBusy("sync"); setError("");
     try { const t = await syncSystem(system); toast(tx("Sync complete", "تمت المزامنة"), tx(`${t.imported} new · ${t.updated} updated`, `${t.imported} جديد · ${t.updated} محدّث`), "ok"); }
     catch (e) { fail(e); } finally { setBusy(""); onChanged(); }
+  }
+  // Demo POS reconnects in place (same sample source, no duplicates). A Lab shop always goes
+  // back through its owner's approval: there is no shortcut that skips it.
+  async function reconnectDemo() {
+    setBusy("reconnect"); setError("");
+    try { await api("/integrations/connections", { method: "POST", json: { provider_code: "demo" } });
+      toast(tx("Reconnected", "تمت إعادة الربط"), "", "ok"); onChanged(); }
+    catch (e) { fail(e); } finally { setBusy(""); }
   }
   async function disconnect() {
     setBusy("disconnect"); setError("");
@@ -292,14 +311,20 @@ function ManageSystem({ system, canManage, autoSync, onClose, onChanged, onRecon
           );
         })}
       </ul>
-      <p className="mt-3 text-[12px] text-ink-3">{autoSync ? tx("New sales sync automatically.", "تتم مزامنة المبيعات الجديدة تلقائيًا.") : tx("Automatic sync is off in this environment. Use “Sync now”.", "المزامنة التلقائية متوقفة في هذه البيئة. استخدم «مزامنة الآن».")}</p>
+      {system.status !== "disconnected" && (
+        <p className="mt-3 text-[12px] text-ink-3">{autoSync ? tx("New sales sync automatically.", "تتم مزامنة المبيعات الجديدة تلقائيًا.") : tx("Syncing is manual: use “Sync now” to bring in new sales.", "المزامنة يدوية: استخدم «مزامنة الآن» لجلب المبيعات الجديدة.")}</p>
+      )}
+      {system.status === "disconnected" && (
+        <p className="mt-3 text-[12px] text-ink-3">{tx("Syncing is stopped. Sales imported earlier are still in IDRAK.", "المزامنة متوقفة. المبيعات المستوردة سابقًا ما زالت في إدراك.")}</p>
+      )}
 
       {canManage && (
         <>
           <div className="mt-5 flex flex-wrap gap-2">
             {active.length > 0 && <Button size="sm" onClick={sync} loading={busy === "sync"} disabled={!!busy}><RefreshCw size={14} />{tx("Sync now", "مزامنة الآن")}</Button>}
             {active.length > 0 && <Button size="sm" variant="secondary" onClick={runTests} loading={busy === "test"} disabled={!!busy}><FlaskConical size={14} />{tx("Test connection", "اختبار الاتصال")}</Button>}
-            {system.status === "disconnected" && system.kind === "lab" && <Button size="sm" onClick={onReconnect}><PlugZap size={14} />{tx("Reconnect", "إعادة الربط")}</Button>}
+            {system.status === "disconnected" && system.kind === "lab" && labLinking && <Button size="sm" onClick={onReconnect} disabled={!!busy}><PlugZap size={14} />{tx("Reconnect (owner approval)", "إعادة الربط (بموافقة المالك)")}</Button>}
+            {system.status === "disconnected" && system.kind === "demo" && <Button size="sm" onClick={reconnectDemo} loading={busy === "reconnect"} disabled={!!busy}><PlugZap size={14} />{tx("Reconnect", "إعادة الربط")}</Button>}
           </div>
 
           <form onSubmit={rename} className="mt-6">
@@ -361,8 +386,9 @@ function ChannelHistory({ id }: { id: string }) {
             <li key={j.id} className="flex items-center gap-1.5">
               <span className={clsx("size-1.5 rounded-full", j.status === "success" ? "bg-olive" : j.status === "failed" ? "bg-danger" : "bg-saffron")} />
               <span>{timeAgo(j.started_at, tx.locale)}</span>
-              <span>· {j.status === "failed" ? tx("failed", "فشلت") : tx(`${j.counts?.imported ?? 0} new`, `${j.counts?.imported ?? 0} جديد`)}</span>
-              <N v={j.counts?.updated ?? 0} /> <span>{tx("updated", "محدّث")}</span>
+              <span>· {j.status === "failed" ? tx("didn't complete", "لم تكتمل")
+                : j.status === "running" ? tx("in progress", "جارية")
+                : tx(`${j.counts?.imported ?? 0} new · ${j.counts?.updated ?? 0} updated`, `${j.counts?.imported ?? 0} جديد · ${j.counts?.updated ?? 0} محدّث`)}</span>
             </li>
           ))}
         </ul>
