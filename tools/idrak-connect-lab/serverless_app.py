@@ -53,7 +53,7 @@ async def authentication(request, call_next):
     return response
 
 
-def static_file(filename):
+def static_file(filename, principal=None):
     assets = lab.ROOT / 'server_assets'
     if not assets.is_dir():
         assets = lab.ROOT / 'public'  # Local development before the Vercel build.
@@ -63,6 +63,7 @@ def static_file(filename):
         text = text.replace('تجربة محلية', 'تجربة مستقلة').replace('وتعمل على جهازك فقط', 'ومعزولة عن مشروع إدراك الأصلي').replace('Local-only', 'Standalone demo')
         if filename == 'inbox.html':
             text = text.replace('href="/" class="active"', 'href="/simulator/" class="active"')
+        text = lab.render_html(text, principal)
     mime = 'text/css' if filename.endswith('.css') else 'application/javascript' if filename.endswith('.js') else 'text/html'
     return Response(text, media_type=mime)
 
@@ -71,7 +72,7 @@ def dispatch_get(principal, x_shop, path, query):
     files = {'/login': 'login.html', '/login.js': 'login.js', '/activate': 'activate.html', '/activate.js': 'activate.js', '/operator': 'home.html', '/': 'home.html', '/pos': 'pos.html', '/shop': 'shop.html', '/admin': 'admin.html',
              '/style.css': 'style.css', '/app.js': 'app.js', '/simulator': 'inbox.html', '/simulator/': 'inbox.html'}
     if path in files:
-        return static_file(files[path])
+        return static_file(files[path], principal)
     if path == '/auth/session':
         return JSONResponse(browser_auth.session_info(principal, x_shop))
     if path == '/health':

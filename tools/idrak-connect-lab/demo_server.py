@@ -371,6 +371,26 @@ def page_allowed(principal, path):
     return not (principal and principal.kind == 'shop' and principal.role == 'cashier' and path in OWNER_PAGES)
 
 
+_OWNER_ELEMENT = re.compile(r'<a\b[^>]*\bdata-owner\b[^>]*>.*?</a>', re.S)
+
+
+def page_role(principal):
+    if principal is None or principal.kind in ('anonymous', 'integration'):
+        return 'none'
+    if principal.kind == 'shop' and principal.role == 'cashier':
+        return 'cashier'
+    return 'owner'  # shop owner, shop credential, operator or the localhost runner
+
+
+def render_html(text, principal):
+    """Decide role-dependent UI on the server, before any script runs: stamp
+    the confirmed role on <html> and drop owner-only elements for everyone else,
+    so no unauthorized option is ever painted (no authorization UI flash)."""
+    role = page_role(principal)
+    text = text.replace('<html lang="ar" dir="rtl">', f'<html lang="ar" dir="rtl" data-role="{role}">', 1)
+    return text if role == 'owner' else _OWNER_ELEMENT.sub('', text)
+
+
 def source_id(channel):
     return 'idrak-lab-pos' if channel == 'pos' else 'idrak-lab-store'
 
@@ -684,7 +704,9 @@ class BaseHandler(BaseHTTPRequestHandler):
         file=ROOT/'public'/filename
         if not file.is_file():return self.send_json(404,{'error':'not found'})
         mime='text/css' if filename.endswith('.css') else ('application/javascript' if filename.endswith('.js') else 'text/html')
-        raw=file.read_bytes();self.send_response(200);self.send_header('Content-Type',mime+'; charset=utf-8')
+        raw=file.read_bytes()
+        if filename.endswith('.html'):raw=render_html(raw.decode('utf-8'),self.principal_()).encode('utf-8')
+        self.send_response(200);self.send_header('Content-Type',mime+'; charset=utf-8')
         self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
         self.end_headers();self.wfile.write(raw)
     def read_json(self):

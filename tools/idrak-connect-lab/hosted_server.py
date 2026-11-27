@@ -110,6 +110,7 @@ class HostedHandler(lab.SourceHandler):
             text = text.replace('Local-only', 'Standalone demo')
             if filename == 'inbox.html':
                 text = text.replace('href="/" class="active"', 'href="/simulator/" class="active"')
+            text = lab.render_html(text, self.principal)
         raw = text.encode('utf-8')
         mime = 'text/css' if filename.endswith('.css') else ('application/javascript' if filename.endswith('.js') else 'text/html')
         self.send_response(200)

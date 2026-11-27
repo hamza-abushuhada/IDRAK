@@ -22,11 +22,11 @@ async function api(path,options={}){
 fetch('/auth/session').then(r=>r.ok?r.json():null).then(session=>{
   if(!session)return;
   const nav=document.querySelector('.nav');
-  const owner=session.role!=='cashier';
-  if(!owner){
-    // Cashiers only see the POS. The server enforces this too.
-    document.querySelectorAll('a[href="/shop"],a[href="/admin"],a[href="/simulator/"],a[href="/"],a[href="http://127.0.0.1:8766/"]').forEach(a=>{if(!a.classList.contains('logo'))a.remove();});
-  }
+  // Fail closed: owner controls need BOTH the server-rendered role and the
+  // session to say owner. Owner-only markup is already stripped server-side
+  // for cashiers and hidden by default in CSS; the server enforces every action.
+  const owner=document.documentElement.dataset.role==='owner'&&session.role==='owner';
+  if(!owner)document.querySelectorAll('[data-owner]').forEach(el=>el.remove());
   if(session.shops&&session.shops.length>1){
     const select=document.createElement('select');select.className='shop-switch';select.setAttribute('aria-label','المحل الحالي');
     session.shops.forEach(s=>{const o=document.createElement('option');o.value=s.shop_id;o.textContent=s.name+(s.role==='cashier'?' (كاشير)':'');o.selected=s.shop_id===session.shop_id;select.append(o);});
