@@ -192,6 +192,15 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"LOYVERSE_REDIRECT_URI": "http://insecure.example.com/cb"}):
             self.assertFalse(loyverse_oauth.available())
 
+    def test_config_log_has_addresses_only_never_secrets(self):
+        loyverse_oauth._LOGGED = False
+        with self.assertLogs('app.services.pos.loyverse_oauth', level='WARNING') as logs:
+            loyverse_oauth.config(); loyverse_oauth.config()
+        line = ' '.join(logs.output)
+        self.assertEqual(len(logs.output), 1, 'logged once per process')
+        self.assertIn('redirect_uri=https://idrak.example.com/ar/app/integrations/loyverse/callback', line)
+        self.assertNotIn('synthetic-client-secret', line); self.assertNotIn('synthetic-client-id', line)
+
     def test_authorize_url_least_privilege_and_state_binding(self):
         a = loyverse_oauth.new_authorization(self.org, self.user, "ar")
         u = urlsplit(a["authorize_url"]); q = {k: v[0] for k, v in parse_qs(u.query).items()}

@@ -59,6 +59,20 @@ def _https(name):
     return value
 
 
+_LOGGED = False
+
+
+def _log_config_once(cfg):
+    """One log line per process with the NON-secret addresses only, so the deployed
+    configuration can be verified from runtime logs (no client id/secret values)."""
+    global _LOGGED
+    if not _LOGGED:
+        _LOGGED = True
+        import logging
+        logging.getLogger(__name__).warning('loyverse config: redirect_uri=%s webhook_url=%s client_id_len=%d',
+                                            cfg['redirect_uri'], cfg['webhook_url'], len(cfg['client_id']))
+
+
 def config() -> dict:
     """All-or-nothing server configuration; never echoed to clients."""
     if os.environ.get('LOYVERSE_ENABLED', 'off').strip().lower() != 'on':
@@ -67,8 +81,10 @@ def config() -> dict:
         cid, secret = os.environ['LOYVERSE_CLIENT_ID'].strip(), os.environ['LOYVERSE_CLIENT_SECRET'].strip()
         if not cid or len(secret) < 16:
             raise ValueError()
-        return {'client_id': cid, 'client_secret': secret, 'redirect_uri': _https('LOYVERSE_REDIRECT_URI'),
-                'webhook_url': _https('LOYVERSE_WEBHOOK_URL')}
+        cfg = {'client_id': cid, 'client_secret': secret, 'redirect_uri': _https('LOYVERSE_REDIRECT_URI'),
+               'webhook_url': _https('LOYVERSE_WEBHOOK_URL')}
+        _log_config_once(cfg)
+        return cfg
     except (KeyError, ValueError):
         raise HTTPException(503, 'Loyverse is not available') from None
 
