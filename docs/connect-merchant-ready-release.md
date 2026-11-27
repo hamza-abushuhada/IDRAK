@@ -26,6 +26,14 @@ Status: **verified on Staging; NOT yet applied to production.**
    - add `IDRAK_STORE_API_KEYS=on` (production API only), then redeploy;
    - the published Lab must have `IDRAK_CONNECT_NOTIFY_URL` set to the production notify address for automatic arrival. Without it, sync still works through catch-up and "Sync now".
 
+## Fixed after the final review (commit ebdd2f4)
+- **Permanent delete closed:** `DELETE /integrations/connections/{id}` refuses any `purge` parameter (403, audited). This applies to every role, and no hard-delete code remains on that path.
+- **Lab orders never wait for IDRAK:**
+  - notifications are sent after the response;
+  - API-key notifications: 5 s cap, one attempt;
+  - one active subscription per store;
+  - approval-link notifications unchanged (20 s and one retry), now also sent after the response.
+
 ## Rollback
 - **App:** promote the previous deployments. Record their IDs at release time in `previous-deployments.json`.
 - **API keys only:** remove the flag and redeploy, or roll back the API. Linked stores then stop syncing; their data stays.
